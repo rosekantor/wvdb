@@ -1,0 +1,8 @@
+.nextflow/
+.nextflow.log*
+work/
+results/
+*.log
+report.html
+timeline.html
+trace.txt
