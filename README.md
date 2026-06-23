@@ -63,14 +63,23 @@ conda activate wf3
 
 ### 2. Verify all tools resolve
 
-```bash
-for tool in seqkit vclust blastn checkv nucmer nextflow; do
-    command -v $tool && $tool --version 2>&1 | head -1 || echo "MISSING: $tool"
-done
+Each tool uses a different flag for version output — use the commands below
+rather than a generic loop:
 
-# Verify Python helper scripts
+```bash
+seqkit version                    # seqkit v2.9.0
+vclust -v                         # vclust 1.3.1
+blastn -version                   # blastn: 2.16.0+
+checkv -h 2>&1 | head -1          # checkv 1.1.x (no dedicated --version flag)
+nucmer --version                  # 4.0.1
+nextflow -v                       # nextflow version 23.x
+```
+
+Verify Python helper scripts are importable and executable from `bin/`:
+
+```bash
 for script in blastani_nayfach.py parse_clusters_v2.py trim_genomes.py completeness_filter.py; do
-    python bin/$script --help > /dev/null 2>&1 && echo "OK: $script" || echo "CHECK: $script (check --help flag)"
+    python bin/$script --help > /dev/null 2>&1         && echo "OK: $script"         || echo "CHECK: $script — may not support --help; try running with no args"
 done
 ```
 
