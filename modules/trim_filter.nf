@@ -1,11 +1,15 @@
 /*
  * modules/trim_filter.nf
- * Processes shared by Branch A and Branch B (and their shared subworkflow).
+ * Processes shared by Branch A, Branch B, and Branch C.
  *
  *   PARSE_CLUSTERS       — wraps parse_clusters_v2.py
- *   TRIM_GENOMES         — wraps trim_genomes.py
+ *   TRIM_GENOMES         — wraps trim_genomes.py (cluster mode)
  *   CHECKV               — wraps checkv end_to_end
  *   COMPLETENESS_FILTER  — wraps completeness_filter.py
+ *
+ * publishDir paths are set dynamically via task.ext.publish_dir, which is
+ * supplied by each calling subworkflow using `ext` directives. This avoids
+ * the DSL2 restriction that prevents val inputs from being used in directives.
  *
  * Tools required in PATH:
  *   parse_clusters_v2.py, trim_genomes.py, completeness_filter.py (via bin/)
@@ -14,23 +18,23 @@
 
 // ---------------------------------------------------------------------------
 // PARSE_CLUSTERS
-// Produces a pairs TSV (for trim_genomes) and a singletons file.
-// mode: "rank12" (branch A) or "rank23" (branch B)
-// restrict_ids: optional path to incomplete IDs file; pass [] to skip
 // ---------------------------------------------------------------------------
 process PARSE_CLUSTERS {
     label 'cpu_low'
 
     tag "${mode}"
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path clusters       // vclust_clusters.tsv
     path lengths        // filtered_all.length.txt
     val  mode           // "rank12" or "rank23"
-    path restrict_ids   // file of IDs to restrict to, or [] for none
+    path restrict_ids   // file of IDs to restrict to, or file('NO_FILE')
 
     output:
-    path "cluster_pairs.tsv",    emit: pairs
+    path "cluster_pairs.tsv",      emit: pairs
     path "cluster_singletons.txt", emit: singletons
 
     script:
@@ -60,13 +64,16 @@ process TRIM_GENOMES {
 
     tag "${pairs.simpleName}"
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path pairs          // cluster_pairs.tsv
-    path fasta          // all_genomes.fasta
+    path fasta          // filtered_all.fasta
 
     output:
-    path "trimmed.fasta",  emit: trimmed_fasta
-    path "trimming.bed",   emit: trimming_bed   // produced by trim_genomes.py
+    path "trimmed.fasta", emit: trimmed_fasta
+    path "trimming.bed",  emit: trimming_bed
 
     script:
     """
@@ -91,6 +98,9 @@ process CHECKV {
     label 'cpu_medium'
 
     tag "${trimmed_fasta.simpleName}"
+
+    publishDir { "${params.outdir}/${task.ext.publish_dir}/checkv_out" }, mode: 'copy',
+        enabled: !workflow.stubRun
 
     input:
     path trimmed_fasta
@@ -120,12 +130,15 @@ process CHECKV {
 // ---------------------------------------------------------------------------
 // COMPLETENESS_FILTER
 // Splits output into complete and incomplete/NA sets.
-// emit_incomplete_fasta: true for branch B (needs the untrimmed FASTA for branch C)
+// emit_incomplete_fasta: true for branch B (FASTA passed to branch C)
 // ---------------------------------------------------------------------------
 process COMPLETENESS_FILTER {
     label 'cpu_low'
 
     tag "${quality_summary.simpleName}"
+
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
 
     input:
     path quality_summary        // checkv_out/quality_summary.tsv
@@ -135,8 +148,8 @@ process COMPLETENESS_FILTER {
     val  emit_incomplete_fasta  // boolean: whether to emit the incomplete FASTA
 
     output:
-    path "cluster_reps_complete.fasta",           emit: complete_fasta
-    path "cluster_reps_incomplete_or_na.txt",     emit: incomplete_ids
+    path "cluster_reps_complete.fasta",        emit: complete_fasta
+    path "cluster_reps_incomplete_or_na.txt",  emit: incomplete_ids
     path "cluster_reps_incomplete.fasta", optional: true, emit: incomplete_fasta
 
     script:

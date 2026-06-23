@@ -1,5 +1,5 @@
 /*
- * modules/branchC.nf
+ * modules/blast_trim.nf
  * Processes specific to Branch C: singleton + incomplete genome trimming
  * via BLAST-mode reference databases.
  *
@@ -10,6 +10,8 @@
  *   TRIM_GENOMES_BLAST — blast-mode trim_genomes.py (uses -a ani_tsv -d blastdb)
  *   MERGE_BRANCHC      — comm-based dedup: refseq_ev hits + metavr-only additions
  *
+ * publishDir paths use task.ext.publish_dir, set by the calling subworkflow.
+ *
  * Tools required in PATH:
  *   seqkit v2.9.0+, blastn v2.16.0+
  *   blastani_nayfach.py, trim_genomes.py (via bin/)
@@ -17,14 +19,16 @@
 
 // ---------------------------------------------------------------------------
 // COLLECT_BRANCHC
-// Greps singletons from the full FASTA and concatenates with B incompletes.
 // ---------------------------------------------------------------------------
 process COLLECT_BRANCHC {
     label 'cpu_low'
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path singletons_ids       // cluster_singletons.txt from PARSE_CLUSTERS (branch A)
-    path incomplete_fasta     // cluster_reps_notcomplete_after23.fasta from BRANCH_B
+    path incomplete_fasta     // cluster_reps_incomplete.fasta from BRANCH_B
     path all_fasta            // filtered_all.fasta
 
     output:
@@ -46,18 +50,19 @@ process COLLECT_BRANCHC {
 
 // ---------------------------------------------------------------------------
 // BLASTN
-// Searches branchC genomes against a reference BLAST database.
-// db_name is a short label used for output file naming (e.g. "refseq_ev" or "metavr").
 // ---------------------------------------------------------------------------
 process BLASTN {
     label 'cpu_high'
 
     tag "${db_name}"
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}/${db_name}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path query_fasta          // branchC_genomes.fasta
-    path blastdb              // path to BLAST db (staged directory or .fna with index files)
-    val  db_name              // short label for output naming
+    path blastdb              // BLAST db (staged directory or .fna + index files)
+    val  db_name              // short label: "refseq_ev" or "metavr"
 
     output:
     path "${db_name}.blastn.tsv", emit: blastn_tsv
@@ -82,12 +87,14 @@ process BLASTN {
 
 // ---------------------------------------------------------------------------
 // BLASTANI
-// Computes ANI from blastn tabular output using blastani_nayfach.py.
 // ---------------------------------------------------------------------------
 process BLASTANI {
     label 'cpu_low'
 
     tag "${blastn_tsv.simpleName}"
+
+    publishDir { "${params.outdir}/${task.ext.publish_dir}/${blastn_tsv.simpleName}" }, mode: 'copy',
+        enabled: !workflow.stubRun
 
     input:
     path blastn_tsv
@@ -111,17 +118,19 @@ process BLASTANI {
 // ---------------------------------------------------------------------------
 // TRIM_GENOMES_BLAST
 // Blast-mode trim_genomes.py: uses -a ani_tsv and -d blastdb instead of -c pairs.
-// db_name label is used to name the output subdirectory.
 // ---------------------------------------------------------------------------
 process TRIM_GENOMES_BLAST {
     label 'cpu_high'
 
     tag "${db_name}"
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}/${db_name}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path ani_tsv              // output of BLASTANI
-    path query_fasta          // branchC_genomes.fasta (full set, for sequence retrieval)
-    path blastdb              // same BLAST db used in BLASTN (for reference sequence retrieval)
+    path query_fasta          // branchC_genomes.fasta
+    path blastdb              // same BLAST db used in BLASTN
     val  db_name              // "refseq_ev" or "metavr"
 
     output:
@@ -137,7 +146,7 @@ process TRIM_GENOMES_BLAST {
         -o . \\
         -t ${task.cpus}
 
-    # rename outputs to db-scoped names to avoid file collisions in downstream processes
+    # Rename to db-scoped names to avoid file collisions in MERGE_BRANCHC
     mv trimmed.fasta ${db_name}.trimmed.fasta
     mv trimming.bed  ${db_name}.trimming.bed
     """
@@ -150,36 +159,33 @@ process TRIM_GENOMES_BLAST {
 
 // ---------------------------------------------------------------------------
 // MERGE_BRANCHC
-// Deduplicates trimmed outputs from the two BLAST branches:
-//   - keep all refseq_ev trimmed sequences
-//   - add metavr-trimmed sequences only if not already in refseq_ev set
-// Mirrors the comm-based logic in the original bash script.
+// Deduplicates trimmed outputs: all refseq_ev + metavr-only additions.
 // ---------------------------------------------------------------------------
 process MERGE_BRANCHC {
     label 'cpu_low'
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
-    path refseq_ev_trimmed    // trimmed.fasta from TRIM_GENOMES_BLAST (refseq_ev)
-    path refseq_ev_bed        // trimming.bed from TRIM_GENOMES_BLAST (refseq_ev)
-    path metavr_trimmed       // trimmed.fasta from TRIM_GENOMES_BLAST (metavr)
-    path metavr_bed           // trimming.bed from TRIM_GENOMES_BLAST (metavr)
+    path refseq_ev_trimmed    // *.trimmed.fasta from TRIM_GENOMES_BLAST (refseq_ev)
+    path refseq_ev_bed        // *.trimming.bed  from TRIM_GENOMES_BLAST (refseq_ev)
+    path metavr_trimmed       // *.trimmed.fasta from TRIM_GENOMES_BLAST (metavr)
+    path metavr_bed           // *.trimming.bed  from TRIM_GENOMES_BLAST (metavr)
 
     output:
     path "branchC_trimmed.fasta", emit: trimmed_fasta
 
     script:
     """
-    # Extract sorted hit IDs from each trimming.bed
     awk '{print \$1}' "${refseq_ev_bed}" | LC_ALL=C sort > refseq_ev_hits_sorted.txt
     awk '{print \$1}' "${metavr_bed}"    | LC_ALL=C sort > metavr_hits_sorted.txt
 
     # IDs trimmed by metavr but NOT by refseq_ev
     LC_ALL=C comm -13 refseq_ev_hits_sorted.txt metavr_hits_sorted.txt > metavr_only_ids.txt
 
-    # Extract metavr-only sequences
     seqkit grep -f metavr_only_ids.txt "${metavr_trimmed}" > metavr_only.fasta
 
-    # Merge: all refseq_ev trimmed + metavr-only additions
     cat "${refseq_ev_trimmed}" metavr_only.fasta > branchC_trimmed.fasta
 
     [[ -s branchC_trimmed.fasta ]] || { echo "ERROR: branchC_trimmed.fasta is empty" >&2; exit 1; }

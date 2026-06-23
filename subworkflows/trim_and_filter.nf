@@ -4,7 +4,9 @@
  *
  *   PARSE_CLUSTERS → TRIM_GENOMES → CHECKV → COMPLETENESS_FILTER
  *
- * The caller supplies mode and restrict_ids to differentiate the two branches.
+ * task.ext.publish_dir is set via nextflow.config withName selectors,
+ * scoped to BRANCH_A:* and BRANCH_B:* so each process publishes to the
+ * correct subdirectory (3_branchA or 4_branchB) without needing a val input.
  */
 
 include { PARSE_CLUSTERS      } from '../modules/trim_filter'
@@ -31,6 +33,7 @@ workflow TRIM_AND_FILTER {
         mode,
         restrict_ids
     )
+    PARSE_CLUSTERS.out.pairs.dump(tag: 'parse_clusters_pairs')
 
     TRIM_GENOMES(
         PARSE_CLUSTERS.out.pairs,
@@ -51,8 +54,8 @@ workflow TRIM_AND_FILTER {
     )
 
     emit:
-    complete_fasta    = COMPLETENESS_FILTER.out.complete_fasta
-    incomplete_ids    = COMPLETENESS_FILTER.out.incomplete_ids
-    incomplete_fasta  = COMPLETENESS_FILTER.out.incomplete_fasta  // empty channel if not emitted
-    singletons        = PARSE_CLUSTERS.out.singletons
+    complete_fasta   = COMPLETENESS_FILTER.out.complete_fasta
+    incomplete_ids   = COMPLETENESS_FILTER.out.incomplete_ids
+    incomplete_fasta = COMPLETENESS_FILTER.out.incomplete_fasta
+    singletons       = PARSE_CLUSTERS.out.singletons
 }
