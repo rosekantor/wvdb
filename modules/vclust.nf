@@ -2,14 +2,13 @@
  * modules/vclust.nf
  * Three vclust processes: prefilter → align → cluster
  * Used for both Step 2 (initial clustering) and Step 6 (reclustering).
- * Parameterised via inputs so the same process definitions serve both steps.
+ * Aliased at the include level in main.nf for the two invocations.
  *
  * Tools required in PATH: vclust v1.3.1+
  */
 
 // ---------------------------------------------------------------------------
 // VCLUST_PREFILTER
-// Generates a sparse candidate-pair list, filtering on minimum identity.
 // ---------------------------------------------------------------------------
 process VCLUST_PREFILTER {
     label 'cpu_high'
@@ -17,8 +16,8 @@ process VCLUST_PREFILTER {
     tag "${fasta.simpleName}"
 
     input:
-    path fasta          // input FASTA (all genomes or recluster input)
-    val  min_ident      // passed as params.ani from the calling workflow
+    path fasta
+    val  min_ident
 
     output:
     path "vclust_prefilter.txt", emit: prefilter
@@ -40,7 +39,6 @@ process VCLUST_PREFILTER {
 
 // ---------------------------------------------------------------------------
 // VCLUST_ALIGN
-// Pairwise alignment of candidate pairs from prefilter, producing ANI table.
 // ---------------------------------------------------------------------------
 process VCLUST_ALIGN {
     label 'cpu_high'
@@ -48,15 +46,15 @@ process VCLUST_ALIGN {
     tag "${fasta.simpleName}"
 
     input:
-    path fasta          // same FASTA used in prefilter
-    path prefilter      // output of VCLUST_PREFILTER
-    val  ani            // ANI threshold (e.g. 0.95)
-    val  qcov           // query coverage threshold (e.g. 0.85)
+    path fasta
+    path prefilter
+    val  ani
+    val  qcov
 
     output:
     path "vclust_ani.tsv",     emit: ani_tsv
     path "vclust_ani.aln.tsv", emit: aln_tsv
-    path "vclust_ani.ids.tsv", emit: ids_tsv   // written by --ids; used downstream
+    path "vclust_ani.ids.tsv", emit: ids_tsv
 
     script:
     """
@@ -69,8 +67,6 @@ process VCLUST_ALIGN {
         --out-aln vclust_ani.aln.tsv \\
         --threads ${task.cpus}
 
-    # vclust align does not write ids itself; create placeholder so VCLUST_CLUSTER
-    # can receive it as a declared output even if empty.
     touch vclust_ani.ids.tsv
     """
 
@@ -82,21 +78,19 @@ process VCLUST_ALIGN {
 
 // ---------------------------------------------------------------------------
 // VCLUST_CLUSTER
-// Leiden clustering from ANI table → cluster assignments + representative IDs.
+// publishDir is intentionally omitted here — val inputs are not available
+// in directive evaluation. Outputs are published via collectFile in main.nf
+// (step 6) and via the COLLECT_GENOMES publishDir chain (step 2).
 // ---------------------------------------------------------------------------
 process VCLUST_CLUSTER {
     label 'cpu_medium'
 
     tag "${ani_tsv.simpleName}"
 
-    publishDir "${params.outdir}/${step_dir}", mode: 'copy', pattern: 'vclust_clusters.tsv'
-    publishDir "${params.outdir}/${step_dir}", mode: 'copy', pattern: 'vclust_ani.ids.tsv'
-
     input:
-    path ani_tsv        // output of VCLUST_ALIGN
-    val  ani            // ANI threshold
-    val  qcov           // qcov threshold
-    val  step_dir       // subdirectory label, e.g. "2_clustered" or "6_reclustered"
+    path ani_tsv
+    val  ani
+    val  qcov
 
     output:
     path "vclust_clusters.tsv", emit: clusters
@@ -123,20 +117,20 @@ process VCLUST_CLUSTER {
 
 // ---------------------------------------------------------------------------
 // GET_CENTROIDS  (Step 6 only)
-// Extract centroid sequences from recluster input FASTA.
 // ---------------------------------------------------------------------------
 process GET_CENTROIDS {
     label 'cpu_low'
 
-    publishDir "${params.outdir}/6_reclustered", mode: 'copy'
+    publishDir "${params.outdir}/6_reclustered", mode: 'copy', enabled: !workflow.stubRun
 
     input:
-    path clusters       // vclust_clusters.tsv from VCLUST_CLUSTER (recluster)
-    path fasta          // recluster_input.fasta
+    path clusters
+    path fasta
 
     output:
-    path "vclust_centroids.txt",  emit: centroid_ids
-    path "vclust_centroids.fasta",emit: centroid_fasta
+    path "vclust_centroids.txt",   emit: centroid_ids
+    path "vclust_centroids.fasta", emit: centroid_fasta
+    path fasta,                     emit: recluster_input  // publishes recluster_input.fasta
 
     script:
     """

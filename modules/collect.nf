@@ -11,7 +11,7 @@
 process COLLECT_GENOMES {
     label 'cpu_low'
 
-    publishDir "${params.outdir}/1_filtered", mode: 'copy'
+    publishDir "${params.outdir}/1_filtered", mode: 'copy', enabled: !workflow.stubRun
 
     input:
     path fastqdir   // top-level fastq directory (passed as a path so Nextflow stages it)
