@@ -3,24 +3,24 @@
  * main.nf  —  wf3 viral genome clustering pipeline
  *
  * Steps:
- *   1. Collect genomes          (COLLECT_GENOMES)
- *   2. Cluster with vclust      (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
- *   3. Branch A trimming        (TRIM_AND_FILTER subworkflow, mode=rank12)
- *   4. Branch B trimming        (TRIM_AND_FILTER subworkflow, mode=rank23, restricted to A incompletes)
- *   5. Branch C blast trimming  (subworkflows/branchC.nf — stubbed, see TODO)
- *   6. Recluster                (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER → GET_CENTROIDS)
+ *   1. Collect genomes      (COLLECT_GENOMES)
+ *   2. Cluster with vclust  (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
+ *   3. Cluster trimming     (CLUSTER_TRIM subworkflow)
+ *                             parse_clusters → seqkit grep → minimap2 →
+ *                             trim12/13/23 → checkv → pick_best → trim23 fallback
+ *   4. Branch C             (BRANCH_C subworkflow — BLAST-mode trimming)
+ *   5. Recluster            (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER → GET_CENTROIDS)
  *
  * Usage:
  *   nextflow run main.nf -profile slurm [--fastqdir /path] [--outdir /path]
- *   nextflow run main.nf -stub          # validate DAG without running tools
+ *   nextflow run main.nf -stub -profile local   # validate DAG without running tools
  */
 
 nextflow.enable.dsl = 2
 
 // ---------------------------------------------------------------------------
 // Imports
-// Step 2 and Step 6 both use the three vclust processes — DSL2 requires
-// aliased includes for any process invoked more than once in the same workflow.
+// vclust processes are aliased for the two invocations (step 2 and step 5).
 // ---------------------------------------------------------------------------
 include { COLLECT_GENOMES                                   } from './modules/collect'
 include { VCLUST_PREFILTER                                  } from './modules/vclust'
@@ -30,17 +30,15 @@ include { VCLUST_PREFILTER as VCLUST_PREFILTER_RECLUST      } from './modules/vc
 include { VCLUST_ALIGN     as VCLUST_ALIGN_RECLUST          } from './modules/vclust'
 include { VCLUST_CLUSTER   as VCLUST_CLUSTER_RECLUST        } from './modules/vclust'
 include { GET_CENTROIDS                                     } from './modules/vclust'
-include { TRIM_AND_FILTER  as BRANCH_A                      } from './subworkflows/trim_and_filter'
-include { TRIM_AND_FILTER  as BRANCH_B                      } from './subworkflows/trim_and_filter'
-include { BRANCH_C                                         } from './subworkflows/branchC'
+include { CLUSTER_TRIM                                      } from './subworkflows/cluster_trim'
+include { BRANCH_C                                          } from './subworkflows/branchC'
 
 // ---------------------------------------------------------------------------
 // Main workflow
 // ---------------------------------------------------------------------------
 workflow {
 
-    // Parameter validation — inline here since def blocks cannot appear
-    // between includes and workflow.onComplete in DSL2.
+    // Parameter validation
     def errors = []
     if (!params.fastqdir)          errors << "  --fastqdir is required"
     if (!params.outdir)            errors << "  --outdir is required"
@@ -65,7 +63,6 @@ workflow {
     ============================================
     """.stripIndent()
 
-    // Resolve database paths so Nextflow can stage them on remote executors
     def check = !workflow.stubRun
     checkvdb          = file(params.checkvdb,           checkIfExists: check)
     refseq_ev_blastdb = file(params.refseq_ev_blastdb,  checkIfExists: check)
@@ -100,57 +97,47 @@ workflow {
     )
 
     // -----------------------------------------------------------------------
-    // Step 3 — Branch A: trim rank-1 vs rank-2 contig pairs
+    // Step 3 — Cluster-based trimming (minimap2 pipeline)
+    // Replaces separate BRANCH_A and BRANCH_B subworkflows.
     // -----------------------------------------------------------------------
-    BRANCH_A(
+    CLUSTER_TRIM(
         VCLUST_CLUSTER.out.clusters,
         COLLECT_GENOMES.out.lengths,
         COLLECT_GENOMES.out.merged_fasta,
-        checkvdb,
-        "rank12",
-        file('NO_FILE'),        // no --restrict-reps for branch A
-        params.completeness,
-        false                   // don't emit incomplete FASTA
+        checkvdb
     )
 
     // -----------------------------------------------------------------------
-    // Step 4 — Branch B: trim rank-2 vs rank-3, restricted to A incompletes
+    // Step 4 — Branch C: BLAST-mode trimming
+    // Receives:
+    //   singletons          — clusters with 1 member (no trimming possible)
+    //   branch_c_fasta      — untrimmed rank1 seqs from 2-member clusters
+    //                         where trim12 was incomplete
+    //   branch_c_fasta23    — untrimmed seqs from clusters where trim23
+    //                         was also incomplete (from COMPLETENESS_FILTER_TRIM23)
+    // COLLECT_BRANCHC cats these two incomplete FASTAs together.
     // -----------------------------------------------------------------------
-    BRANCH_B(
-        VCLUST_CLUSTER.out.clusters,
-        COLLECT_GENOMES.out.lengths,
-        COLLECT_GENOMES.out.merged_fasta,
-        checkvdb,
-        "rank23",
-        BRANCH_A.out.incomplete_ids,   // --restrict-reps from branch A output
-        params.completeness,
-        true                           // emit incomplete FASTA for branch C
-    )
 
-    // -----------------------------------------------------------------------
-    // Step 5 — Branch C: singletons + B incompletes → BLAST-mode trimming
-    // -----------------------------------------------------------------------
+    // Merge the two sources of incomplete sequences into one FASTA for branch C
+    branch_c_incomplete = CLUSTER_TRIM.out.branch_c_fasta
+        .mix(CLUSTER_TRIM.out.branch_c_fasta23)
+        .collectFile(name: "branch_c_incomplete.fasta")
+
     BRANCH_C(
-        BRANCH_A.out.singletons,
-        BRANCH_B.out.incomplete_fasta,
+        CLUSTER_TRIM.out.singletons,
+        branch_c_incomplete,
         COLLECT_GENOMES.out.merged_fasta,
         refseq_ev_blastdb,
         imgvr_blastdb,
         checkvdb,
         params.completeness
     )
-    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // Step 6 — Recluster: merge all complete sets, run vclust again
-    // Note: the original script has a manual checkpoint here. In Nextflow this
-    // is modelled as a straight cat + recluster. Add an external review step
-    // outside the pipeline if manual inspection is still needed.
+    // Step 5 — Recluster all complete representatives
     // -----------------------------------------------------------------------
-    // collectFile merges branch outputs into a single FASTA for reclustering.
-    // recluster_input.fasta is published via GET_CENTROIDS publishDir in step 6.
-    recluster_input = BRANCH_A.out.complete_fasta
-        .mix(BRANCH_B.out.complete_fasta)
+    recluster_input = CLUSTER_TRIM.out.complete_fasta
+        .mix(CLUSTER_TRIM.out.complete_fasta23)
         .mix(BRANCH_C.out.complete_fasta)
         .collectFile(name: "recluster_input.fasta")
 

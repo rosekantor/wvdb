@@ -1,201 +1,185 @@
 #!/usr/bin/env python3
+"""
+trim_genomes.py — trim query sequences using pairwise alignments from a minimap2 PAF file.
+
+Replaces the nucmer/show-coords based approach with PAF parsing, eliminating per-pair
+sequence extraction and enabling parallel trimming from a single shared alignment file.
+
+Usage:
+  trim_genomes.py -p alignments.paf -pairs pairs12.tsv -f candidates.fasta -o outdir [-t THREADS]
+
+Input PAF format (minimap2 -x asm5 output):
+  Col 0:  query name
+  Col 1:  query length
+  Col 2:  query start (0-based)
+  Col 3:  query end   (0-based, open)
+  Col 4:  strand (+/-)
+  Col 5:  target name
+  Col 6:  target length
+  Col 7:  target start (0-based)
+  Col 8:  target end   (0-based, open)
+  Col 9:  residue matches
+  Col 10: alignment block length
+  Col 11: mapping quality
+
+Coordinate conversion:
+  PAF uses 0-based half-open intervals [start, end).
+  seqkit subseq --bed uses 1-based closed intervals [start, end].
+  Conversion: bed_start = paf_start + 1,  bed_end = paf_end  (no change to end)
+
+Trimming logic:
+  For each (query, target) pair in pairs_tsv:
+    - Find all PAF rows where col0==query AND col5==target (or reverse orientation)
+    - Keep the row with the largest alignment block length (col10)
+    - The BED interval is derived from the QUERY coordinates (we are trimming the query)
+    - Write BED: query_name <TAB> bed_start <TAB> bed_end
+  Run seqkit subseq --bed on query_fasta to produce trimmed.fasta.
+  Clean up coordinate suffixes from FASTA headers added by seqkit subseq.
+"""
 
 import argparse
-import concurrent.futures
-from glob import glob
 import os
-import pandas as pd
 import re
 import subprocess
-import shutil
 import sys
 
-def initialize(query_fasta, outdir):
-    '''
-    Check for dependencies and required files. Make output subdirectories.
-    '''
-    REQUIRED_PROGS = ["seqkit", "nucmer", "show-coords"]
-
-    missing = [prog for prog in REQUIRED_PROGS if shutil.which(prog) is None]
-
-    if missing:
-        print(
-        "Error: required program(s) not found in PATH: {}\n"
-        "Please install them or add them to your PATH.\n".format(", ".join(missing)),
-        file=sys.stderr
-        )
-        sys.exit(1)
-
-    if not os.path.isfile(query_fasta):
-        print(f"Error: fasta file not found: {query_fasta}", file=sys.stderr)
-        sys.exit(1)
-
-    os.makedirs(outdir, exist_ok=True)
-    os.makedirs(f'{outdir}/pairs', exist_ok=True)
-    os.makedirs(f'{outdir}/aln', exist_ok=True)
+import pandas as pd
 
 
-def get_alns(blastani_file, qcov=85, tcov=85):
-    '''
-    In BLAST-based trimming mode:
-    Load BLAST ANI results and derive a qname/tname pairs DataFrame.
-    Filters rows where qcov >= qcov or tcov >= tcov, then for each qname
-    keeps the row with maximum qcov.
-    ALTERNATIVELY - run pull_aln on just one row.
-    '''
-    ani_df = pd.read_csv(blastani_file, sep='\t')
-    # allow either query cov or target cov to be > specified value 
-    # this is because the query could be a chimeric misassembly, resulting in a much longer sequence with <85% covered by the target
-    ani_df = ani_df[(ani_df.qcov >= qcov) | (ani_df.tcov >= tcov)]
-    # from the filtered hits to each query, choose only the single target with max query coverage to use for trimming
-    if ani_df.empty:
-        print("Warning: no BLAST ANI hits passed coverage filters, no pairs will be generated.", file=sys.stderr)
-        return pd.DataFrame(columns=["qname", "tname"])
-    
-    else:
-        idx = ani_df.groupby('qname')['qcov'].idxmax()
-        pairs_df = ani_df.loc[idx][['qname', 'tname']]
-        return pairs_df
+# ---------------------------------------------------------------------------
+# PAF parsing
+# ---------------------------------------------------------------------------
 
-def build_seqkitfaidx(pairs_df, query_fasta, target_fasta, fastadir, threads):
-    '''
-    Run a single seqkit faidx command for both the query_fasta and target_fasta, to generate the faidx file.
-    This command will pull a single entry from the multi-fasta file target_fasta
-    This should speed up subsequent seqkit faidx runs called in pull_aln().
-    Also, if this fails, we won't try to run pull_aln().
-    '''
-    if pairs_df.empty:
-        print("No pairs to align", file=sys.stderr)
-        return None
+PAF_COLS = [
+    'qname', 'qlen', 'qstart', 'qend', 'strand',
+    'tname', 'tlen', 'tstart', 'tend',
+    'n_matches', 'aln_block_len', 'mapq'
+]
 
-    query = pairs_df['qname'].values[0]
-    target = pairs_df['tname'].values[0]
-    target_newname = re.split(r'\||\ |,', target)[0]
-
-    # 1) Test pulling one query
-    cmd1 = [
-        "seqkit", "faidx", query_fasta, query,
-        "--threads", str(threads)
-    ]
-    q_out = os.path.join(fastadir, f"{query}.fasta")
-
-    # 2) Test pulling one target
-    cmd2 = [
-        "seqkit", "faidx", target_fasta, target,
-        "--threads", str(threads)
-    ]
-    t_out = os.path.join(fastadir, f"{target_newname}.fasta")
-
-    try:
-        with open(q_out, "w") as fq:
-            r1 = subprocess.run(cmd1, stdout=fq, stderr=subprocess.PIPE, text=True)
-        with open(t_out, "w") as ft:
-            r2 = subprocess.run(cmd2, stdout=ft, stderr=subprocess.PIPE, text=True)
-    except OSError as e:
-        print(f"Error creating test fasta files: {e}", file=sys.stderr)
-        return None
-
-    if r1.returncode != 0:
-        print(f"Error running seqkit faidx on query: {r1.stderr}", file=sys.stderr)
-        return r1
-    if r2.returncode != 0:
-        print(f"Error running seqkit faidx on target: {r2.stderr}", file=sys.stderr)
-        return r2
-
-    return r2  # or r1, both have returncode
-
-def pull_aln(row_id, query, target, query_fasta, target_fasta, fastadir, alndir):
-    '''
-    This function takes a single pair of sequences that should be aligned for use in trimming the query sequence.
-    Seqkit is used to pull the target and query sequences from their respective multi-fasta files into a single fasta file. 
-    Then nucmer is used to align them and get alignment coordinates.
-    Note that show-coords commands are hard-coded to require 1000 nt overlapping alignment at >=90% ID.
-    
-    :param row: row from pairs_df
-    '''
-    # get a target name that can be used as a fasta file name by removing bad characters
-    target_newname = re.split(r'\||\ |,', target)[0]
-
-    qsuffix = f"{query}_{row_id}"
-    tsuffix = f"{target_newname}_{row_id}"
-
-    cmd = (
-        f'seqkit faidx "{query_fasta}" "{query}" > "{fastadir}/{qsuffix}.query.fasta"; '
-        f'seqkit faidx "{target_fasta}" "{target}" > "{fastadir}/{tsuffix}.target.fasta"; '
-        f'nucmer -p "{alndir}/query_{qsuffix}" "{fastadir}/{qsuffix}.query.fasta" "{fastadir}/{tsuffix}.target.fasta"; '
-        f'show-coords -r -c -l -L 1000 -I 90 -T "{alndir}/query_{qsuffix}.delta" > "{alndir}/query_{qsuffix}.coords"'
+def load_paf(paf_path):
+    """
+    Load a minimap2 PAF file into a DataFrame.
+    Only the first 12 columns are read; optional cs/cg tags are ignored.
+    Handles bgzipped PAF (.paf.gz) transparently via pandas.
+    """
+    df = pd.read_csv(
+        paf_path,
+        sep='\t',
+        header=None,
+        usecols=range(12),
+        names=PAF_COLS,
+        dtype={
+            'qname': str, 'tname': str, 'strand': str,
+            'qlen': int, 'qstart': int, 'qend': int,
+            'tlen': int, 'tstart': int, 'tend': int,
+            'n_matches': int, 'aln_block_len': int, 'mapq': int,
+        }
     )
-
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"Error for {query}: {result.stderr}", file=sys.stderr)
-
-    return result.returncode
+    return df
 
 
-def parse_nucmer(alndir):
-    '''
-    Read individual nucmer coords files found in the alndir
-    Generate bed file that can be used to correctly trim the query sequences downstream
-    '''
+def load_pairs(pairs_tsv):
+    """
+    Load a two-column TSV of (query, target) pairs.
+    Returns a list of (query, target) tuples.
+    """
+    pairs = []
+    with open(pairs_tsv) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) < 2:
+                print(f"Warning: skipping malformed pairs line: {repr(line)}", file=sys.stderr)
+                continue
+            pairs.append((parts[0], parts[1]))
+    return pairs
 
-    files = glob(f'{alndir}/*.coords')
 
-    if not files:
-        print(f"No .coords files found in {alndir}, cannot create BED.", file=sys.stderr)
-        return pd.DataFrame(columns=['ref_name', 'start1', 'end1'])
-    else:
-        dfs = []
-        headers = ['start1','end1', 'start2', 'end2', 'len1', 'len2', 'pid',
-                   'len_ref', 'len_query', 'cov_ref', 'cov_query', 'ref_name', 'query_name']
-        for file in files:
-            df = pd.read_csv(file, sep='\t', names=headers, skiprows=4)
-            if not df.empty:          # filter out empty coords files
-                dfs.append(df)
+def build_bed(pairs, paf_df):
+    """
+    For each (query, target) pair, find the best PAF alignment and derive
+    a BED interval on the query sequence.
 
-        if not dfs:
-            # All coords files were empty
-            print(f"Warning: all coords files in {alndir} are empty, no alignments found.", file=sys.stderr)
-            return pd.DataFrame(columns=['ref_name', 'start1', 'end1'])
+    PAF is directional: minimap2 reports the alignment from query→target.
+    We always want to trim the query, so we use query coordinates regardless
+    of strand. This is correct because PAF query coordinates are always on
+    the forward strand of the query sequence.
 
-        aln_df = pd.concat(dfs, ignore_index=True)
-        # Ensure start is always less than stop
-        aln_df['start1'], aln_df['end1'] = (
-            aln_df[['start1', 'end1']].min(axis=1),
-            aln_df[['start1', 'end1']].max(axis=1)
+    Returns a DataFrame with columns [qname, bed_start, bed_end] and a list
+    of (query, target) pairs that had no PAF hit.
+    """
+    # Build a lookup dict: (qname, tname) → best row (max aln_block_len)
+    # Also index (tname, qname) in case minimap2 reported the pair reversed.
+    paf_indexed = {}
+    for _, row in paf_df.iterrows():
+        key_fwd = (row['qname'], row['tname'])
+        key_rev = (row['tname'], row['qname'])
+        for key in (key_fwd, key_rev):
+            if key not in paf_indexed or row['aln_block_len'] > paf_indexed[key]['aln_block_len']:
+                paf_indexed[key] = row
+
+    bed_rows = []
+    no_hit = []
+
+    for query, target in pairs:
+        key = (query, target)
+        row = paf_indexed.get(key)
+
+        if row is None:
+            no_hit.append((query, target))
+            continue
+
+        # Determine which sequence is the query in this PAF row
+        if row['qname'] == query:
+            paf_start = row['qstart']
+            paf_end   = row['qend']
+        else:
+            # Pair was found reversed in PAF; use target coords as query coords
+            # (minimap2 reported target→query; we still trim 'query')
+            paf_start = row['tstart']
+            paf_end   = row['tend']
+
+        # Convert 0-based half-open [paf_start, paf_end) → 1-based closed [bed_start, bed_end]
+        bed_start = paf_start + 1
+        bed_end   = paf_end       # end is the same in 1-based closed
+
+        bed_rows.append({'qname': query, 'bed_start': bed_start, 'bed_end': bed_end})
+
+    if no_hit:
+        print(
+            f"Warning: {len(no_hit)} pairs had no PAF alignment and will be skipped:\n" +
+            '\n'.join(f"  {q}\t{t}" for q, t in no_hit[:10]) +
+            ('\n  ...' if len(no_hit) > 10 else ''),
+            file=sys.stderr
         )
 
-        # account for multiple alignments per cluster pair by taking the longest one
-        idx = aln_df.groupby('ref_name')['cov_ref'].idxmax()
-        aln_max_df = aln_df.loc[idx]
-
-        # make a bed file that can be used by seqkit subseq
-        bed_df = aln_max_df[['ref_name', 'start1', 'end1']].copy()
-
-        return bed_df
+    bed_df = pd.DataFrame(bed_rows, columns=['qname', 'bed_start', 'bed_end'])
+    return bed_df, no_hit
 
 
-def run_trimming(query_fasta, outdir, threads):
+# ---------------------------------------------------------------------------
+# Trimming
+# ---------------------------------------------------------------------------
+
+def run_trimming(query_fasta, bed_path, outdir, threads):
     """
-    Run seqkit subseq with the BED file to trim sequences, then
-    clean up contig names by removing coordinate suffixes from fasta headers.
+    Run seqkit subseq with the BED file to trim sequences, then clean up
+    coordinate suffixes added by seqkit to the FASTA headers.
     """
-    bed_file = os.path.join(outdir, "trimming.bed")
-    temp_fasta = os.path.join(outdir, "trimmed_temp.fasta")
-    final_fasta = os.path.join(outdir, "trimmed.fasta")
-
-    if not os.path.isfile(bed_file):
-        print(f"Error: BED file '{bed_file}' not found, cannot trim.", file=sys.stderr)
-        sys.exit(1)
+    temp_fasta  = os.path.join(outdir, 'trimmed_temp.fasta')
+    final_fasta = os.path.join(outdir, 'trimmed.fasta')
 
     cmd_subseq = [
-        "seqkit", "subseq",
-        "--bed", bed_file,
+        'seqkit', 'subseq',
+        '--bed', bed_path,
         query_fasta,
-        "-j", str(threads),
+        '-j', str(threads),
     ]
+
     try:
-        with open(temp_fasta, "w") as fout:
+        with open(temp_fasta, 'w') as fout:
             result = subprocess.run(
                 cmd_subseq,
                 stdout=fout,
@@ -203,165 +187,111 @@ def run_trimming(query_fasta, outdir, threads):
                 text=True,
             )
     except OSError as e:
-        print(f"Error: unable to write temporary trimmed FASTA: {e}", file=sys.stderr)
+        print(f"Error writing temporary trimmed FASTA: {e}", file=sys.stderr)
         sys.exit(1)
 
     if result.returncode != 0:
         print(f"Error running seqkit subseq: {result.stderr}", file=sys.stderr)
         sys.exit(1)
 
-    # Fix contig names
+    # seqkit subseq appends '_start-end:.' to each header; strip it
     pattern = re.compile(r'_\d+-\d+:\.')
 
     try:
-        with open(temp_fasta, "r") as fin, open(final_fasta, "w") as fout:
+        with open(temp_fasta) as fin, open(final_fasta, 'w') as fout:
             for line in fin:
-                # Apply substitution only to header lines if desired:
-                if line.startswith(">"):
-                    line = pattern.sub("", line)
+                if line.startswith('>'):
+                    line = pattern.sub('', line)
                 fout.write(line)
     except OSError as e:
         print(f"Error rewriting trimmed FASTA: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Remove temp file
     try:
         os.remove(temp_fasta)
     except OSError:
-        # Not fatal; just warn
-        print(f"Warning: could not remove temporary file '{temp_fasta}'", file=sys.stderr)
+        print(f"Warning: could not remove temp file '{temp_fasta}'", file=sys.stderr)
 
+    return final_fasta
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run nucmer alignments from either cluster pairs or BLAST-ANI results."
-    )
-
-    # Common required arguments
-    parser.add_argument(
-        "-f", "--fasta", required=True,
-        help="FASTA used as input to clustering or BLASTn"
+        description=(
+            "Trim query sequences using pairwise alignments from a minimap2 PAF file. "
+            "Replaces the nucmer/show-coords approach used in the original pipeline."
+        )
     )
     parser.add_argument(
-        "-o", "--outdir", required=True,
-        help="Output directory"
+        '-p', '--paf', required=True,
+        help='minimap2 PAF file (plain or bgzipped .paf.gz)'
     )
     parser.add_argument(
-        "-t", "--threads", type=int, default=1,
-        help="Number of threads to use"
+        '--pairs', required=True,
+        help='Two-column TSV of (query, target) pairs to trim'
     )
-
-    # Mode specific arguments
-    group = parser.add_mutually_exclusive_group(required=True)
-
-    # Branch A: cluster mode
-    group.add_argument(
-        "-c", "--cluster_pairs",
-        help="Cluster pairs file output from parse_clusters.py (enables cluster mode). Either -a or -c is required."
-    )
-
-    # Branch B: BLAST mode
-    group.add_argument(
-        "-a", "--blast_ani",
-        help="BLAST ANI output file (enables BLAST mode, requires --blast_db_fasta. Either -a or -c is required.)"
-    )
-
     parser.add_argument(
-        "-d", "--blast_db_fasta",
-        help="FASTA file corresponding to the BLAST database (required in BLAST mode)"
+        '-f', '--fasta', required=True,
+        help='FASTA containing the query sequences (candidates.fasta from seqkit grep)'
     )
+    parser.add_argument(
+        '-o', '--outdir', required=True,
+        help='Output directory; trimmed.fasta and trimming.bed are written here'
+    )
+    parser.add_argument(
+        '-t', '--threads', type=int, default=1,
+        help='Threads to pass to seqkit subseq (default: 1)'
+    )
+    return parser.parse_args()
 
-    args = parser.parse_args()
-
-    # Enforce branch B requirement: if blast_ani is given, blast_db_fasta must be given
-    if args.blast_ani is not None and args.blast_db_fasta is None:
-        parser.error("Argument --blast_db_fasta is required when --blast_ani is used")
-
-    # Optionally, enforce that blast_db_fasta is NOT given when in cluster mode
-    if args.cluster_pairs is not None and args.blast_db_fasta is not None:
-        parser.error("--blast_db_fasta should only be used together with --blast_ani")
-
-    return args
 
 def main():
-
     args = parse_args()
-    threads = args.threads
-    query_fasta = args.fasta
-    outdir = args.outdir
 
-    initialize(query_fasta, outdir) # check dependencies and files; mkdirs
-    # 1. Get pairs of sequences to align for downstream trimming
-    if args.cluster_pairs is not None:
-        # Branch A: cluster-based trimming mode
-        target_fasta = query_fasta
-        cluster_pairs = args.cluster_pairs
-        if not os.path.isfile(cluster_pairs):
-            print(f"Error: File '{cluster_pairs}' does not exist.", file=sys.stderr)
+    for path in [args.paf, args.pairs, args.fasta]:
+        if not os.path.isfile(path):
+            print(f"Error: file not found: {path}", file=sys.stderr)
             sys.exit(1)
-        # get cluster pairs, provided in file generated by parse_clusters.py
-        pairs_df = pd.read_csv(cluster_pairs, sep='\t', names=['qname', 'tname'])
 
-    else:
-        # Branch B: BLAST-based trimming mode
-        blast_ani = args.blast_ani
-        target_fasta = args.blast_db_fasta
-        files = [blast_ani, target_fasta]
-        missing = [f for f in files if not os.path.isfile(f)]
-        if missing:
-            for f in missing:
-                print(f"Error: File '{f}' does not exist.", file=sys.stderr)
-            sys.exit(1)
-        # get query-target pairs from the BLAST ani results generated by blastani.py
-        pairs_df = get_alns(blast_ani)
+    os.makedirs(args.outdir, exist_ok=True)
 
-    fastadir = os.path.join(outdir, "pairs")
-    alndir = os.path.join(outdir, "aln")
+    # 1. Load PAF and pairs
+    print(f"Loading PAF: {args.paf}", file=sys.stderr)
+    paf_df = load_paf(args.paf)
+    print(f"  {len(paf_df):,} alignment records", file=sys.stderr)
 
-    # 2. Test pulling of a single sequence from each multifasta and have seqkit generate faidx
-    result = build_seqkitfaidx(pairs_df, query_fasta, target_fasta, fastadir, threads)
-    if result is None:
+    pairs = load_pairs(args.pairs)
+    print(f"  {len(pairs):,} pairs to trim", file=sys.stderr)
+
+    if not pairs:
+        print("No pairs to process — writing empty outputs.", file=sys.stderr)
+        open(os.path.join(args.outdir, 'trimming.bed'),  'w').close()
+        open(os.path.join(args.outdir, 'trimmed.fasta'), 'w').close()
         sys.exit(0)
-    elif result.returncode != 0:
-        print("Error: failed to build seqkit faidx file(s)", file=sys.stderr)
-        sys.exit(1)
 
-    # 3. For each pair of sequences in pairs_df, pull single fasta from multi-fasta, then align with nucmer
-    ## before pulling fasta files, check that query names (qname) are unique to avoid conflicts from multiple workers trying to create the same file
-    if pairs_df["qname"].duplicated().any():
-        dups = pairs_df[pairs_df["qname"].duplicated()]["qname"].unique()
-        print(f"Error: duplicate qname values in pairs_df: {', '.join(map(str, dups))}",
-            file=sys.stderr)
-        sys.exit(1)
-    with concurrent.futures.ProcessPoolExecutor(max_workers=min(threads, len(pairs_df))) as executor:
-        futures = []
-        for idx, r in pairs_df.iterrows():
-            qname = r["qname"]
-            tname = r["tname"]
-            futures.append(
-                executor.submit(pull_aln, idx, qname, tname, query_fasta, target_fasta, fastadir, alndir)
-            )
-        # wait for all to finish
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                rc = future.result()
-                if rc != 0:
-                    print(f"Alignment task failed with code {rc}", file=sys.stderr)
-            except Exception as e:
-                print(f"Alignment task raised an exception: {e}", file=sys.stderr)
+    # 2. Build BED from PAF
+    bed_df, no_hit = build_bed(pairs, paf_df)
 
-    # 4. Parse the nucmer coords output into a bed file for rapid downstream trimming with seqkit subseq
-    bed_df = parse_nucmer(alndir)
     if bed_df.empty:
-        # error message
-        print(f"Error: No alignments created. BED file will not be written.", file=sys.stderr)
+        print(
+            "Error: no PAF alignments found for any pair. "
+            "Check that the PAF was generated from the same FASTA as the pairs TSV.",
+            file=sys.stderr
+        )
         sys.exit(1)
-    else:
-        bed_path = os.path.join(outdir, "trimming.bed")
-        bed_df.to_csv(bed_path, sep='\t', index=False, header=False)
 
-    # 5. Run trimming with seqkit subseq and clean contig names
-    run_trimming(query_fasta, outdir, threads)
+    bed_path = os.path.join(args.outdir, 'trimming.bed')
+    bed_df.to_csv(bed_path, sep='\t', index=False, header=False)
+    print(f"  BED written: {len(bed_df)} intervals → {bed_path}", file=sys.stderr)
 
-if __name__ == "__main__":
+    # 3. Trim with seqkit subseq
+    final_fasta = run_trimming(args.fasta, bed_path, args.outdir, args.threads)
+    print(f"  Trimmed FASTA written → {final_fasta}", file=sys.stderr)
+
+
+if __name__ == '__main__':
     main()

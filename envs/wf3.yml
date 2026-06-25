@@ -20,6 +20,8 @@ dependencies:
   - bioconda::blast=2.16.0        # provides blastn, makeblastdb
   - bioconda::checkv              # latest (1.1.1+); backward compatible with 1.0.3 db
   - bioconda::mummer4=4.0.1       # provides nucmer; package name is mummer4 on bioconda
+  - bioconda::minimap2>=2.26       # pairwise alignment replacing nucmer in cluster trim step
+  - bioconda::samtools>=1.18       # provides bgzip (used to compress PAF output)
 
   # --- checkv hard dependency: pin diamond to avoid older version bug ---
   # conda can install an older DIAMOND with checkv; >=2.0.9 is required
