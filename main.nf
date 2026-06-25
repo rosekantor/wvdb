@@ -94,6 +94,7 @@ workflow {
 
     VCLUST_CLUSTER(
         VCLUST_ALIGN.out.ani_tsv,
+        VCLUST_ALIGN.out.ids_tsv,
         params.ani,
         params.qcov
     )
@@ -167,6 +168,7 @@ workflow {
 
     VCLUST_CLUSTER_RECLUST(
         VCLUST_ALIGN_RECLUST.out.ani_tsv,
+        VCLUST_ALIGN_RECLUST.out.ids_tsv,
         params.ani,
         params.qcov
     )

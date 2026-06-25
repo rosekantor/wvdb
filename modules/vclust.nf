@@ -4,6 +4,11 @@
  * Used for both Step 2 (initial clustering) and Step 6 (reclustering).
  * Aliased at the include level in main.nf for the two invocations.
  *
+ * CLI summary (vclust 1.3.1):
+ *   vclust prefilter  -i <fasta> -o <filter>
+ *   vclust align      -i <fasta> -o <ani.tsv>   --filter <filter>
+ *   vclust cluster    -i <ani.tsv> -o <clusters> --ids <id_map>   (--ids is OUTPUT)
+ *
  * Tools required in PATH: vclust v1.3.1+
  */
 
@@ -39,6 +44,8 @@ process VCLUST_PREFILTER {
 
 // ---------------------------------------------------------------------------
 // VCLUST_ALIGN
+// Produces ani.tsv (and optionally aln.tsv).
+// Does NOT produce an ids file — that is written by vclust cluster.
 // ---------------------------------------------------------------------------
 process VCLUST_ALIGN {
     label 'cpu_high'
@@ -54,7 +61,7 @@ process VCLUST_ALIGN {
     output:
     path "vclust_ani.tsv",     emit: ani_tsv
     path "vclust_ani.aln.tsv", emit: aln_tsv
-    path "vclust_ani.ids.tsv", emit: ids_tsv
+    path "vclust_ani.ids.tsv", emit: ids_tsv   // required input for vclust cluster
 
     script:
     """
@@ -67,7 +74,13 @@ process VCLUST_ALIGN {
         --out-aln vclust_ani.aln.tsv \\
         --threads ${task.cpus}
 
-    touch vclust_ani.ids.tsv
+    # vclust cluster requires a TSV of sequence IDs and lengths (id, seq_len, no_parts).
+    # vclust align writes this internally to a temp dir and discards it, so we
+    # generate it here from the input FASTA using seqkit.
+    # vclust cluster --ids requires a TSV with columns: id, seq_len, no_parts
+    # Generate from the input FASTA (no_parts is always 1 for standard FASTA).
+    printf "id\tseq_len\tno_parts\n" > vclust_ani.ids.tsv
+    seqkit fx2tab -nl "${fasta}" | awk 'BEGIN{OFS="\t"}{print \$1, \$2, 1}' >> vclust_ani.ids.tsv
     """
 
     stub:
@@ -78,9 +91,8 @@ process VCLUST_ALIGN {
 
 // ---------------------------------------------------------------------------
 // VCLUST_CLUSTER
-// publishDir is intentionally omitted here — val inputs are not available
-// in directive evaluation. Outputs are published via collectFile in main.nf
-// (step 6) and via the COLLECT_GENOMES publishDir chain (step 2).
+// --ids is an OUTPUT path: vclust cluster writes the sequence-ID-to-cluster
+// mapping there. It is NOT an input and does not need to exist beforehand.
 // ---------------------------------------------------------------------------
 process VCLUST_CLUSTER {
     label 'cpu_medium'
@@ -88,20 +100,20 @@ process VCLUST_CLUSTER {
     tag "${ani_tsv.simpleName}"
 
     input:
-    path ani_tsv
+    path ani_tsv    // output of VCLUST_ALIGN
+    path ids_tsv    // sequence ID/length file generated in VCLUST_ALIGN
     val  ani
     val  qcov
 
     output:
     path "vclust_clusters.tsv", emit: clusters
-    path "vclust_ani.ids.tsv",  emit: ids
 
     script:
     """
     vclust cluster \\
         -i "${ani_tsv}" \\
         -o vclust_clusters.tsv \\
-        --ids vclust_ani.ids.tsv \\
+        --ids "${ids_tsv}" \\
         --algorithm leiden \\
         --metric ani \\
         --ani ${ani} \\
@@ -111,7 +123,7 @@ process VCLUST_CLUSTER {
 
     stub:
     """
-    touch vclust_clusters.tsv vclust_ani.ids.tsv
+    touch vclust_clusters.tsv
     """
 }
 
@@ -130,7 +142,7 @@ process GET_CENTROIDS {
     output:
     path "vclust_centroids.txt",   emit: centroid_ids
     path "vclust_centroids.fasta", emit: centroid_fasta
-    path fasta,                     emit: recluster_input  // publishes recluster_input.fasta
+    path fasta,                    emit: recluster_input  // publishes recluster_input.fasta
 
     script:
     """
