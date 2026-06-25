@@ -44,8 +44,9 @@ process VCLUST_PREFILTER {
 
 // ---------------------------------------------------------------------------
 // VCLUST_ALIGN
-// Produces ani.tsv (and optionally aln.tsv).
-// Does NOT produce an ids file — that is written by vclust cluster.
+// Produces ani.tsv, aln.tsv, and vclust_ani.ids.tsv.
+// vclust align writes vclust_ani.ids.tsv to the current working directory automatically.
+// This file is required as input to vclust cluster --ids.
 // ---------------------------------------------------------------------------
 process VCLUST_ALIGN {
     label 'cpu_high'
@@ -61,7 +62,7 @@ process VCLUST_ALIGN {
     output:
     path "vclust_ani.tsv",     emit: ani_tsv
     path "vclust_ani.aln.tsv", emit: aln_tsv
-    path "vclust_ani.ids.tsv", emit: ids_tsv   // required input for vclust cluster
+    path "vclust_ani.ids.tsv", emit: ids_tsv   // written by vclust align to CWD
 
     script:
     """
@@ -74,13 +75,7 @@ process VCLUST_ALIGN {
         --out-aln vclust_ani.aln.tsv \\
         --threads ${task.cpus}
 
-    # vclust cluster requires a TSV of sequence IDs and lengths (id, seq_len, no_parts).
-    # vclust align writes this internally to a temp dir and discards it, so we
-    # generate it here from the input FASTA using seqkit.
-    # vclust cluster --ids requires a TSV with columns: id, seq_len, no_parts
-    # Generate from the input FASTA (no_parts is always 1 for standard FASTA).
-    printf "id\tseq_len\tno_parts\n" > vclust_ani.ids.tsv
-    seqkit fx2tab -nl "${fasta}" | awk 'BEGIN{OFS="\t"}{print \$1, \$2, 1}' >> vclust_ani.ids.tsv
+    [[ -f vclust_ani.ids.tsv ]] || { echo "ERROR: vclust align did not produce vclust_ani.ids.tsv" >&2; exit 1; }
     """
 
     stub:

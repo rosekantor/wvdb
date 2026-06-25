@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-parse_clusters_v2.py — extract contig pairs and candidate IDs from vclust cluster output.
+parse_clusters.py — extract contig pairs and candidate IDs from vclust cluster output.
 
 Modes:
   rank12:   longest vs second-longest (original branch A behaviour)

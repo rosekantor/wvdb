@@ -1,16 +1,15 @@
 /*
- * modules/blast_trim.nf
- * Processes specific to Branch C: singleton + incomplete genome trimming
- * via BLAST-mode reference databases.
+ * modules/blast_trim_tools.nf
+ * Processes for BLAST-mode reference-guided trimming (step 4).
  *
  * Process list:
- *   COLLECT_BRANCHC    — seqkit grep singletons + cat with B incompletes
- *   BLASTN             — blastn search against a reference db
- *   BLASTANI           — compute ANI from blastn tabular output
- *   TRIM_GENOMES_BLAST — blast-mode trim_genomes.py (uses -a ani_tsv -d blastdb)
- *   MERGE_BRANCHC      — comm-based dedup: refseq_ev hits + metavr-only additions
+ *   COLLECT_BLAST_INPUT  — seqkit grep singletons + cat with cluster-trim incompletes
+ *   BLASTN               — blastn search against a reference db
+ *   BLASTANI             — compute ANI from blastn tabular output
+ *   TRIM_GENOMES_BLAST   — blast-mode trim_genomes.py (uses -a ani_tsv -d blastdb)
+ *   MERGE_BLAST_TRIM     — comm-based dedup: refseq_ev hits + metavr-only additions
  *
- * publishDir paths use task.ext.publish_dir, set by the calling subworkflow.
+ * publishDir paths use task.ext.publish_dir set via nextflow.config withName selectors.
  *
  * Tools required in PATH:
  *   seqkit v2.9.0+, blastn v2.16.0+
@@ -18,33 +17,38 @@
  */
 
 // ---------------------------------------------------------------------------
-// COLLECT_BRANCHC
+// COLLECT_BLAST_INPUT
+// Greps singletons from the full FASTA and concatenates with cluster-trim
+// incomplete sequences to form the full blast-trim input set.
 // ---------------------------------------------------------------------------
-process COLLECT_BRANCHC {
+process COLLECT_BLAST_INPUT {
     label 'cpu_low'
 
     publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
         enabled: !workflow.stubRun
 
     input:
-    path singletons_ids       // cluster_singletons.txt from PARSE_CLUSTERS (branch A)
-    path incomplete_fasta     // cluster_reps_incomplete.fasta from BRANCH_B
+    path singletons_ids       // cluster_singletons.txt from PARSE_CLUSTERS_ALL
+    path incomplete_fasta     // merged incomplete seqs from cluster_trim step
     path all_fasta            // filtered_all.fasta
 
     output:
-    path "branchC_genomes.fasta", emit: branchC_fasta
+    path "blast_trim_input.fasta", emit: blast_trim_fasta
 
     script:
     """
     seqkit grep -f "${singletons_ids}" "${all_fasta}" -o singletons.fasta
-    cat singletons.fasta "${incomplete_fasta}" > branchC_genomes.fasta
+    cat singletons.fasta "${incomplete_fasta}" > blast_trim_input.fasta
 
-    [[ -s branchC_genomes.fasta ]] || { echo "ERROR: branchC_genomes.fasta is empty" >&2; exit 1; }
+    [[ -s blast_trim_input.fasta ]] || {
+        echo "ERROR: blast_trim_input.fasta is empty" >&2
+        exit 1
+    }
     """
 
     stub:
     """
-    touch branchC_genomes.fasta
+    touch blast_trim_input.fasta
     """
 }
 
@@ -60,8 +64,8 @@ process BLASTN {
         enabled: !workflow.stubRun
 
     input:
-    path query_fasta          // branchC_genomes.fasta
-    path blastdb              // BLAST db (staged directory or .fna + index files)
+    path query_fasta          // blast_trim_input.fasta
+    path blastdb              // BLAST db (.fna + index files)
     val  db_name              // short label: "refseq_ev" or "metavr"
 
     output:
@@ -117,7 +121,8 @@ process BLASTANI {
 
 // ---------------------------------------------------------------------------
 // TRIM_GENOMES_BLAST
-// Blast-mode trim_genomes.py: uses -a ani_tsv and -d blastdb instead of -c pairs.
+// Blast-mode trim_genomes.py: uses -a ani_tsv and -d blastdb.
+// db_name scopes output filenames to avoid collisions in MERGE_BLAST_TRIM.
 // ---------------------------------------------------------------------------
 process TRIM_GENOMES_BLAST {
     label 'cpu_high'
@@ -129,7 +134,7 @@ process TRIM_GENOMES_BLAST {
 
     input:
     path ani_tsv              // output of BLASTANI
-    path query_fasta          // branchC_genomes.fasta
+    path query_fasta          // blast_trim_input.fasta
     path blastdb              // same BLAST db used in BLASTN
     val  db_name              // "refseq_ev" or "metavr"
 
@@ -146,7 +151,6 @@ process TRIM_GENOMES_BLAST {
         -o . \\
         -t ${task.cpus}
 
-    # Rename to db-scoped names to avoid file collisions in MERGE_BRANCHC
     mv trimmed.fasta ${db_name}.trimmed.fasta
     mv trimming.bed  ${db_name}.trimming.bed
     """
@@ -158,10 +162,11 @@ process TRIM_GENOMES_BLAST {
 }
 
 // ---------------------------------------------------------------------------
-// MERGE_BRANCHC
-// Deduplicates trimmed outputs: all refseq_ev + metavr-only additions.
+// MERGE_BLAST_TRIM
+// Deduplicates trimmed outputs: keep all refseq_ev trimmed sequences plus
+// any metavr-trimmed sequences not already covered by refseq_ev.
 // ---------------------------------------------------------------------------
-process MERGE_BRANCHC {
+process MERGE_BLAST_TRIM {
     label 'cpu_low'
 
     publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
@@ -174,7 +179,7 @@ process MERGE_BRANCHC {
     path metavr_bed           // *.trimming.bed  from TRIM_GENOMES_BLAST (metavr)
 
     output:
-    path "branchC_trimmed.fasta", emit: trimmed_fasta
+    path "blast_trim_merged.fasta", emit: trimmed_fasta
 
     script:
     """
@@ -186,13 +191,16 @@ process MERGE_BRANCHC {
 
     seqkit grep -f metavr_only_ids.txt "${metavr_trimmed}" > metavr_only.fasta
 
-    cat "${refseq_ev_trimmed}" metavr_only.fasta > branchC_trimmed.fasta
+    cat "${refseq_ev_trimmed}" metavr_only.fasta > blast_trim_merged.fasta
 
-    [[ -s branchC_trimmed.fasta ]] || { echo "ERROR: branchC_trimmed.fasta is empty" >&2; exit 1; }
+    [[ -s blast_trim_merged.fasta ]] || {
+        echo "ERROR: blast_trim_merged.fasta is empty" >&2
+        exit 1
+    }
     """
 
     stub:
     """
-    touch branchC_trimmed.fasta
+    touch blast_trim_merged.fasta
     """
 }

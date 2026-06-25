@@ -1,4 +1,4 @@
-name: wf3
+name: wvdb-build
 # Channel priority: conda-forge first (general deps), then bioconda (bio tools).
 # strict channel priority prevents subtle dependency conflicts.
 # To create:   mamba env create -f envs/wf3.yml
