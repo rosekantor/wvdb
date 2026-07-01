@@ -1,16 +1,15 @@
 #!/usr/bin/env nextflow
 /*
- * main.nf  —  wvdb_build: viral genome database build pipeline
+ * main.nf  —  wf3 viral genome clustering pipeline
  *
  * Steps:
- *   1. Collect genomes    (COLLECT_GENOMES)
- *   2. Cluster            (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
- *   3. Cluster trim       (CLUSTER_TRIM subworkflow)
- *                            Branch A: parallel trim12 + trim13 → checkv → pick_best
- *                            Branch B: sequential trim23 on incomplete rank1 subset
- *   4. BLAST trim         (BLAST_TRIM subworkflow)
- *                            singletons + cluster-trim failures → BLAST → trim → checkv
- *   5. Recluster          (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER → GET_CENTROIDS)
+ *   1. Collect genomes      (COLLECT_GENOMES)
+ *   2. Cluster with vclust  (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
+ *   3. Cluster trimming     (CLUSTER_TRIM subworkflow)
+ *                             parse_clusters → seqkit grep → minimap2 →
+ *                             trim12/13/23 → checkv → pick_best → trim23 fallback
+ *   4. Branch C             (BRANCH_C subworkflow — BLAST-mode trimming)
+ *   5. Recluster            (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER → GET_CENTROIDS)
  *
  * Usage:
  *   nextflow run main.nf -profile slurm [--fastqdir /path] [--outdir /path]
@@ -21,7 +20,7 @@ nextflow.enable.dsl = 2
 
 // ---------------------------------------------------------------------------
 // Imports
-// vclust processes aliased for step 2 and step 5 invocations.
+// vclust processes are aliased for the two invocations (step 2 and step 5).
 // ---------------------------------------------------------------------------
 include { COLLECT_GENOMES                                   } from './modules/collect'
 include { VCLUST_PREFILTER                                  } from './modules/vclust'
@@ -32,7 +31,7 @@ include { VCLUST_ALIGN     as VCLUST_ALIGN_RECLUST          } from './modules/vc
 include { VCLUST_CLUSTER   as VCLUST_CLUSTER_RECLUST        } from './modules/vclust'
 include { GET_CENTROIDS                                     } from './modules/vclust'
 include { CLUSTER_TRIM                                      } from './subworkflows/cluster_trim'
-include { BLAST_TRIM                                        } from './subworkflows/blast_trim'
+include { BRANCH_C                                          } from './subworkflows/branchC'
 
 // ---------------------------------------------------------------------------
 // Main workflow
@@ -53,7 +52,7 @@ workflow {
 
     log.info """
     ============================================
-     wvdb_build: viral genome database pipeline
+     wf3 viral clustering pipeline
     ============================================
      fastqdir    : ${params.fastqdir}
      outdir      : ${params.outdir}
@@ -98,9 +97,8 @@ workflow {
     )
 
     // -----------------------------------------------------------------------
-    // Step 3 — Cluster-based trimming
-    //   minimap2 all-vs-all on rank1/2/3 candidates → pick best alignment
-    //   per cluster across pairs12/13/23 → CheckV → split by completeness
+    // Step 3 — Cluster-based trimming (minimap2 pipeline)
+    // Replaces separate BRANCH_A and BRANCH_B subworkflows.
     // -----------------------------------------------------------------------
     CLUSTER_TRIM(
         VCLUST_CLUSTER.out.clusters,
@@ -110,14 +108,24 @@ workflow {
     )
 
     // -----------------------------------------------------------------------
-    // Step 4 — BLAST-mode trimming
-    //   Receives singletons + incomplete sequences from cluster trim step
+    // Step 4 — Branch C: BLAST-mode trimming
+    // Receives:
+    //   singletons          — clusters with 1 member (no trimming possible)
+    //   branch_c_fasta      — untrimmed rank1 seqs from 2-member clusters
+    //                         where trim12 was incomplete
+    //   branch_c_fasta23    — untrimmed seqs from clusters where trim23
+    //                         was also incomplete (from COMPLETENESS_FILTER_TRIM23)
+    // COLLECT_BRANCHC cats these two incomplete FASTAs together.
     // -----------------------------------------------------------------------
-    blast_trim_incomplete = CLUSTER_TRIM.out.blast_trim_fasta
 
-    BLAST_TRIM(
+    // Merge the two sources of incomplete sequences into one FASTA for branch C
+    branch_c_incomplete = CLUSTER_TRIM.out.branch_c_fasta
+        .mix(CLUSTER_TRIM.out.branch_c_fasta23)
+        .collectFile(name: "branch_c_incomplete.fasta")
+
+    BRANCH_C(
         CLUSTER_TRIM.out.singletons,
-        blast_trim_incomplete,
+        branch_c_incomplete,
         COLLECT_GENOMES.out.merged_fasta,
         refseq_ev_blastdb,
         imgvr_blastdb,
@@ -127,11 +135,10 @@ workflow {
 
     // -----------------------------------------------------------------------
     // Step 5 — Recluster all complete representatives
-    //   Merges complete outputs from step 3 (branches A + B) and step 4
     // -----------------------------------------------------------------------
-
     recluster_input = CLUSTER_TRIM.out.complete_fasta
-        .mix(BLAST_TRIM.out.complete_fasta)
+        .mix(CLUSTER_TRIM.out.complete_fasta23)
+        .mix(BRANCH_C.out.complete_fasta)
         .collectFile(name: "recluster_input.fasta")
 
     VCLUST_PREFILTER_RECLUST(
