@@ -1,12 +1,76 @@
 # wvdb_build
 
 Viral genome database build pipeline. Collects viral and proviral genome
-assemblies across samples, clusters them with vclust, trims chimeric
+assemblies across samples, clusters them by sequence identity, trims chimeric
 assemblies using pairwise alignments, assesses completeness with CheckV,
-and produces a non-redundant set of representative genomes via reclustering.
+and produces a non-redundant set of representative genomes.
 
 This pipeline lives in the `wvdb-build/` subdirectory of the wvdb repository,
 alongside `wvdb-annotate/` and other workflows.
+
+---
+
+## Pipeline overview
+
+```mermaid
+flowchart TD
+    A[/"Input FASTAs\nfiltered_virus + filtered_provirus\nper sample"/]
+    A --> B
+
+    B["Step 1: Collect\nCOLLECT_GENOMES\nfiltered_all.fasta"]
+    B --> C
+
+    C["Step 2: Cluster\nVCLUST_PREFILTER → ALIGN → CLUSTER\nvclust_clusters.tsv"]
+    C -->|singletons| D
+    C -->|multi-member clusters| E
+
+    subgraph CT ["Step 3: Cluster trim"]
+        E["PARSE_CLUSTERS + EXTRACT_TRIMMING_SEQS\nrank1/2/3 pairs + candidates.fasta"]
+        E --> F["MINIMAP2_PAIRWISE\nall-vs-all → alignments.paf.gz"]
+        F --> G["TRIM_FROM_PAF\nbest alignment across pairs12/13/23\n→ trimmed.fasta"]
+        G --> H["CHECKV → PICK_BEST_TRIM\ncompleteness split"]
+    end
+
+    H -->|"complete ✓"| R
+    H -->|incomplete| D
+
+    subgraph BT ["Step 4: BLAST trim (optional)"]
+        D["COLLECT_BLAST_INPUT\nsingletons + cluster-trim incomplete"]
+        D --> I["BLASTN initial db"]
+        D --> J["BLASTN secondary db\n(if run_secondary_blast=true)"]
+        I --> K["SELECT_BEST_BLAST_HIT\nprefer initial; secondary if no initial hit"]
+        J --> K
+        K -->|"no hit in either db"| U
+        K -->|"has hit"| L["TRIM_GENOMES_BLAST + CHECKV\nnucmer trim → completeness filter"]
+    end
+
+    L -->|"complete ✓"| R
+    L -->|incomplete| U
+
+    U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv")]
+
+    R["Step 5: Recluster\nVCLUST complete reps from steps 3+4\n→ vclust_centroids.fasta"]
+    R --> S
+
+    S[/"vclust_centroids.fasta\nfinal non-redundant viral genome set"/]
+    S --> T["PIPELINE_SUMMARY\npipeline_summary.md + .tsv"]
+
+    style CT fill:none,stroke:#888,stroke-dasharray:5 3
+    style BT fill:none,stroke:#888,stroke-dasharray:5 3
+    style U fill:#faeeda,stroke:#ba7517
+    style S fill:#e1f5ee,stroke:#0f6e56
+```
+
+### Sequence routing summary
+
+| Sequence type | After step 3 | After step 4 | Final destination |
+|---|---|---|---|
+| Multi-member cluster, trimmed complete | → recluster | — | `vclust_centroids.fasta` |
+| Multi-member cluster, trimmed incomplete | → blast_trim | complete → recluster | `vclust_centroids.fasta` |
+| Multi-member cluster, trimmed incomplete | → blast_trim | incomplete → unvalidated | `unvalidated_genomes.fasta` |
+| Singleton | → blast_trim | complete → recluster | `vclust_centroids.fasta` |
+| Singleton | → blast_trim | no hit or incomplete | `unvalidated_genomes.fasta` |
+| Any | — | — (run_initial_blast=false) | `unvalidated_genomes.fasta` |
 
 ---
 
@@ -15,30 +79,35 @@ alongside `wvdb-annotate/` and other workflows.
 ```
 wvdb-build/
 ├── main.nf                         # Entry point; wires all steps
-├── nextflow.config                 # Params, profiles (local, slurm, conda, test)
+├── nextflow.config                 # Params, profiles (local, slurm, slurm_nomem, conda, test)
 ├── conf/
 │   └── base.config                 # Per-process CPU/memory resource labels
 ├── modules/
 │   ├── collect.nf                  # Step 1: collect and merge input FASTAs
 │   ├── vclust.nf                   # Steps 2 & 5: vclust prefilter/align/cluster + centroids
-│   ├── cluster_trim_tools.nf       # Step 3 processes: parse_clusters, minimap2, trim_from_paf,
-│   │                               #   checkv, pick_best_trim, fetch_blast_input_seqs
-│   └── blast_trim_tools.nf         # Step 4 processes: blastn, blastani, trim_genomes (blast mode),
-│                                   #   merge_blast_trim, checkv, completeness_filter
+│   ├── cluster_trim_tools.nf       # Step 3 processes: parse_clusters, extract seqs,
+│   │                               #   minimap2, trim_from_paf, checkv, pick_best_trim
+│   ├── blast_trim_tools.nf         # Step 4 processes: blastn, blastani, select_best_hit,
+│   │                               #   trim_genomes, merge_trimmed, checkv,
+│   │                               #   completeness_filter, collect_unvalidated
+│   └── summary.nf                  # PIPELINE_SUMMARY: sequence counts report
 ├── subworkflows/
-│   ├── cluster_trim.nf             # Step 3: minimap2-based cluster trimming subworkflow
-│   └── blast_trim.nf               # Step 4: BLAST-mode reference trimming subworkflow
+│   ├── cluster_trim.nf             # Step 3: minimap2-based cluster trimming
+│   └── blast_trim.nf               # Step 4: BLAST-mode reference trimming (optional)
 ├── bin/                            # Python scripts (auto-added to PATH by Nextflow)
 │   ├── parse_clusters.py           # Extract rank1/2/3 pairs from vclust clusters
 │   ├── trim_from_paf.py            # Select best alignment per cluster from PAF, write BED
-│   ├── pick_best_trim.py           # Split trimmed output by CheckV completeness
-│   ├── trim_genomes.py             # Nucmer-based trimming for blast mode (step 4)
-│   ├── blastani_nayfach.py         # Compute ANI from blastn tabular output
-│   └── completeness_filter.py      # Filter sequences by CheckV completeness threshold
+│   ├── pick_best_trim.py           # Split trimmed seqs by CheckV completeness
+│   ├── trim_genomes.py             # Nucmer-based trimming for BLAST mode (step 4)
+│   ├── select_best_blast_hit.py    # Route queries to initial or secondary db
+│   ├── blastani_nayfach.py         # Compute pairwise ANI from blastn tabular output
+│   ├── completeness_filter.py      # Filter sequences by CheckV completeness threshold
+│   ├── collect_unvalidated.py      # Gather unvalidated seqs with reason report
+│   └── pipeline_summary.py         # Sequence counts at each step → TSV + markdown report
 ├── envs/
 │   └── wvdb_build.yml              # Conda environment for all tools
 └── test/
-    └── data/                       # Small test inputs for local/cluster validation
+    └── data/                       # Small test inputs (sample/assembly/run/ structure)
 ```
 
 ---
@@ -54,7 +123,7 @@ All tools are managed via the conda environment in `envs/wvdb_build.yml`.
 | vclust | 1.3.1 | |
 | minimap2 | ≥ 2.26 | Cluster-mode trimming (step 3) |
 | blastn | 2.16.0+ | Via `blast` conda package |
-| checkv | latest (1.1.1+) | |
+| checkv | ≥ 1.0.3 | |
 | nucmer | 4.0.1 | BLAST-mode trimming (step 4); via `mummer4` conda package |
 | samtools | ≥ 1.18 | Provides `bgzip` for PAF compression |
 | diamond | ≥ 2.0.9 | CheckV hard dependency |
@@ -67,23 +136,24 @@ All tools are managed via the conda environment in `envs/wvdb_build.yml`.
 ### 1. Create the conda environment
 
 ```bash
-# Recommended: use mamba for faster dependency solving
+# Recommended: use mamba for faster solving
 conda install -n base -c conda-forge mamba
-
 mamba env create -f envs/wvdb_build.yml
+
+# If mamba fails to solve, fall back to conda:
+# conda env create -f envs/wvdb_build.yml
+
 conda activate wvdb-build
 ```
 
 ### 2. Verify all tools resolve
-
-Each tool uses a different version flag:
 
 ```bash
 seqkit version                    # seqkit v2.9.0
 vclust -v                         # vclust 1.3.1
 minimap2 --version                # 2.26+
 blastn -version                   # blastn: 2.16.0+
-checkv -h 2>&1 | head -1          # checkv 1.1.x
+checkv -h 2>&1 | head -1          # checkv 1.x
 nucmer --version                  # 4.0.1
 nextflow -v                       # nextflow version 23.x
 bgzip --version 2>&1 | head -1    # bgzip 1.18+
@@ -93,10 +163,11 @@ Verify Python helper scripts:
 
 ```bash
 for script in parse_clusters.py trim_from_paf.py pick_best_trim.py \
-              trim_genomes.py blastani_nayfach.py completeness_filter.py; do
+              trim_genomes.py select_best_blast_hit.py blastani_nayfach.py \
+              completeness_filter.py collect_unvalidated.py pipeline_summary.py; do
     python bin/$script --help > /dev/null 2>&1 \
         && echo "OK: $script" \
-        || echo "CHECK: $script — try running with no args"
+        || echo "CHECK: $script"
 done
 ```
 
@@ -118,60 +189,67 @@ conda activate wvdb-build
 cd wvdb-build
 
 nextflow run main.nf -profile slurm,conda \
-    --fastqdir /path/to/fastq \
-    --outdir   /path/to/results \
-    --checkvdb /path/to/checkv-db-v1.5 \
-    --refseq_ev_blastdb /path/to/esviritu_plus_refseq_virus.fna \
-    --imgvr_blastdb     /path/to/IMGVR5_UViG.fna \
+    --fastqdir          /path/to/fastq \
+    --outdir            /path/to/results \
+    --checkvdb          /path/to/checkv-db-v1.5 \
+    --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna \
+    --secondary_blastdb /path/to/IMGVR5_UViG.fna \
+    --run_secondary_blast true \
     -resume
 ```
 
 The `-profile slurm,conda` combination uses SLURM as the executor and
-activates the wvdb-build conda environment for every submitted job.
-This is required because SLURM jobs run in a fresh shell that does not
-inherit the interactive `conda activate`.
+activates the conda environment for every submitted job. This is required
+because SLURM jobs do not inherit the interactive `conda activate`.
 
-The `-resume` flag restarts from the last successful checkpoint if any
-process fails.
+For clusters where `DefMemPerNode=UNLIMITED` (memory not tracked per job),
+use `slurm_nomem` instead of `slurm` to avoid memory specification errors:
+
+```bash
+nextflow run main.nf -profile slurm_nomem,conda ...
+```
+
+### Initial BLAST database only (no secondary)
+
+```bash
+nextflow run main.nf -profile slurm,conda \
+    --fastqdir        /path/to/fastq \
+    --outdir          /path/to/results \
+    --checkvdb        /path/to/checkv-db \
+    --initial_blastdb /path/to/esviritu_plus_refseq_virus.fna \
+    -resume
+```
+
+### Skipping BLAST trim entirely
+
+When `--run_initial_blast false`, all singletons and cluster-trim incomplete
+sequences go directly to `unvalidated/` with no BLAST search performed:
+
+```bash
+nextflow run main.nf -profile slurm,conda \
+    --fastqdir          /path/to/fastq \
+    --outdir            /path/to/results \
+    --checkvdb          /path/to/checkv-db \
+    --run_initial_blast false \
+    -resume
+```
 
 ### Local development / macOS
 
-BLAST-mode trimming (step 4) requires large reference databases that are
-not practical to run locally. For local development, run steps 1–3 and 5
-by temporarily commenting out `BLAST_TRIM` in `main.nf`.
+BLAST-mode trimming requires large reference databases not practical to run
+locally. Set `--run_initial_blast false` for local development:
 
 ```bash
 conda activate wvdb-build
 cd wvdb-build
 
 nextflow run main.nf -profile local \
-    --fastqdir /path/to/fastq \
-    --outdir   /path/to/results \
-    --checkvdb /path/to/checkv-db-v1.5 \
-    --refseq_ev_blastdb /path/to/small_test_db.fna \
-    --imgvr_blastdb     /path/to/small_test_db.fna \
-    --max_memory '32 GB' \
+    --fastqdir          /path/to/fastq \
+    --outdir            /path/to/results \
+    --checkvdb          /path/to/checkv-db \
+    --run_initial_blast false \
+    --max_memory        '32 GB' \
     -resume
-```
-
-### Test profile
-
-Place test FASTAs under `test/data/` following the expected layout:
-
-```
-test/data/
-└── <sample>/
-    └── assembly/
-        └── <run>/
-            ├── filtered_virus.fasta
-            └── filtered_provirus.fasta
-```
-
-```bash
-nextflow run main.nf -profile test,conda \
-    --checkvdb /path/to/checkv-db-v1.5 \
-    --refseq_ev_blastdb /path/to/esviritu_plus_refseq_virus.fna \
-    --imgvr_blastdb     /path/to/IMGVR5_UViG.fna
 ```
 
 ---
@@ -183,14 +261,18 @@ nextflow run main.nf -profile test,conda \
 | `--fastqdir` | required | Top-level input dir; expects `<sample>/assembly/<run>/filtered_*.fasta` |
 | `--outdir` | required | Output directory |
 | `--checkvdb` | required | CheckV database directory (e.g. `checkv-db-v1.5`) |
-| `--refseq_ev_blastdb` | required | RefSeq virus + EsViritu BLAST db (`.fna` + all index files in same dir) |
-| `--imgvr_blastdb` | required | IMG-VR v5 (MetaVR) BLAST db (`.fna` + all index files in same dir) |
+| `--initial_blastdb` | null | Primary BLAST reference db — required if `run_initial_blast=true` |
+| `--secondary_blastdb` | null | Secondary BLAST reference db — required if `run_secondary_blast=true` |
+| `--run_initial_blast` | true | Search `initial_blastdb` for singletons + incomplete sequences |
+| `--run_secondary_blast` | false | Also search `secondary_blastdb`; initial db hit preferred when both match |
 | `--ani` | 0.95 | ANI threshold for vclust clustering |
 | `--qcov` | 0.85 | Query coverage threshold for vclust |
 | `--completeness` | 90 | CheckV completeness threshold (%) |
 | `--threads` | 100 | Thread count for high-CPU processes |
-| `--max_memory` | `'64 GB'` | Memory cap; reduce for local runs (e.g. `'32 GB'`) |
-| `--conda_env` | auto | Path to conda env yml or prefix; overrides default in `conda` profile |
+| `--max_memory` | `'64 GB'` | Memory cap for high/medium-CPU processes |
+| `--max_memory_low` | `'16 GB'` | Memory cap for low-CPU processes |
+| `--max_time` | `'24 h'` | Maximum runtime for any process |
+| `--conda_env` | auto | Conda env yml path or prefix; overrides default in `conda` profile |
 
 > **BLAST database note:** BLAST index files must reside in the same directory
 > as the `.fna` file. The pipeline passes database paths as strings (not staged
@@ -209,7 +291,7 @@ outdir/
 │   └── filtered_provirus_all.fasta
 ├── 2_clustered/
 │   ├── vclust_clusters.tsv             # cluster assignments (object<TAB>cluster)
-│   └── vclust_ani.ids.tsv              # sequence ID/length index (produced by vclust align)
+│   └── vclust_ani.ids.tsv              # sequence ID/length file from vclust align
 ├── 3_cluster_trim/
 │   ├── pairs12.tsv                     # rank1 vs rank2 pairs
 │   ├── pairs13.tsv                     # rank1 vs rank3 pairs
@@ -223,55 +305,23 @@ outdir/
 │   ├── checkv/                         # CheckV quality assessment
 │   ├── complete_reps.fasta             # complete trimmed reps → step 5
 │   └── blast_trim_ids.txt              # incomplete cluster IDs → step 4
-├── 4_blast_trim/
+├── 4_blast_trim/                       # only created if run_initial_blast=true
 │   ├── blast_trim_input.fasta          # singletons + incomplete from step 3
-│   ├── refseq_ev/                      # blastn + blastani + trim outputs (refseq_ev db)
-│   ├── metavr/                         # blastn + blastani + trim outputs (metavr db)
-│   ├── blast_trim_merged.fasta         # merged trimmed output
-│   ├── checkv/
+│   ├── initial/                        # blastn + blastani + trim outputs (initial db)
+│   ├── secondary/                      # blastn + blastani + trim outputs (secondary db)
+│   ├── blast_trimmed.fasta             # merged trimmed output (initial + secondary-only)
+│   ├── checkv/                         # CheckV quality assessment
 │   └── cluster_reps_complete.fasta     # complete reps → step 5
-└── 5_reclustered/
-    ├── recluster_input.fasta           # merged complete reps from steps 3 + 4
-    ├── vclust_clusters.tsv
-    ├── vclust_centroids.txt
-    └── vclust_centroids.fasta          # ← FINAL OUTPUT: non-redundant genome set
-```
-
----
-
-## Pipeline overview
-
-```
-Input FASTAs (filtered_virus.fasta + filtered_provirus.fasta per sample)
-    │
-    ▼
-Step 1: Collect & merge (COLLECT_GENOMES)
-    │
-    ▼
-Step 2: Cluster (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
-    │
-    ▼
-Step 3: Cluster trimming (CLUSTER_TRIM subworkflow)
-    │   parse_clusters.py → rank1/2/3 pairs + candidate sequences
-    │   minimap2 all-vs-all on candidates → alignments.paf
-    │   trim_from_paf.py → pick best alignment per cluster (pairs12/13/23)
-    │                       by alignment block length → BED → trimmed.fasta
-    │   CheckV → pick_best_trim.py
-    │       complete → step 5
-    │       incomplete + singletons → step 4
-    │
-    ▼
-Step 4: BLAST-mode trimming (BLAST_TRIM subworkflow)
-    │   singletons + incomplete from step 3
-    │   blastn × 2 (refseq_ev + metavr, parallel) → blastani → trim_genomes.py
-    │   merge (refseq_ev results + metavr-only) → CheckV → completeness_filter
-    │       complete → step 5
-    │
-    ▼
-Step 5: Recluster (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER → GET_CENTROIDS)
-    │
-    ▼
-vclust_centroids.fasta — final non-redundant viral genome set
+├── unvalidated/
+│   ├── unvalidated_genomes.fasta       # untrimmed seqs: no BLAST hit or incomplete after trim
+│   └── unvalidated_report.tsv          # per-seq reason: no_blast_hit | incomplete_after_trimming
+├── 5_reclustered/
+│   ├── recluster_input.fasta           # merged complete reps from steps 3 + 4
+│   ├── vclust_clusters.tsv
+│   ├── vclust_centroids.txt
+│   └── vclust_centroids.fasta          # ← FINAL OUTPUT: non-redundant genome set
+├── pipeline_summary.tsv                # sequence counts at each step (machine-readable)
+└── pipeline_summary.md                 # sequence counts report (human-readable)
 ```
 
 ---
@@ -293,9 +343,9 @@ Nextflow resolves `./modules/`, `./subworkflows/`, and `./bin/` relative to
 ### Conda environment on the cluster
 
 SLURM jobs run in a fresh shell and do not inherit `conda activate` from the
-login shell. Always use `-profile slurm,conda` (not just `-profile slurm`) for
-cluster runs. The `conda` profile sets `process.conda` so every submitted job
-activates the environment before running.
+login session. Always use `-profile slurm,conda` for cluster runs. The `conda`
+profile sets `process.conda` so every submitted job activates the environment
+before running tools.
 
 ### BLAST database staging
 
@@ -303,22 +353,36 @@ BLAST databases are passed as `val` strings (not `path` inputs) to prevent
 Nextflow from staging only the `.fna` file and leaving the index files behind.
 All index files must be present in the same directory as the `.fna` file.
 
-### Updating the conda environment
+### Memory configuration across clusters
 
+| Cluster config | Profile to use | Notes |
+|---|---|---|
+| `DefMemPerCPU` set | `slurm` | Explicit `--mem` requests work normally |
+| `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Omits `--mem` flag; SLURM manages allocation |
+
+Override memory caps at runtime for either profile:
 ```bash
-# Edit envs/wvdb_build.yml, then:
-mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
-nextflow run main.nf -stub -profile local   # confirm DAG still validates
-git add envs/wvdb_build.yml && git commit -m "feat: update conda env"
+nextflow run main.nf --max_memory '120 GB' --max_memory_low '8 GB' ...
 ```
 
 ### PAF output for network analysis
 
 `3_cluster_trim/alignments.paf.gz` contains the full minimap2 all-vs-all
-alignment of rank1/2/3 candidate sequences. This file can be used to build
-a pairwise similarity network of cluster representatives for downstream
-visualization (e.g. Cytoscape, gephi) or to re-examine clustering thresholds
-without rerunning minimap2.
+alignment of rank1/2/3 candidate sequences. This can be used to build a
+pairwise similarity network for downstream visualization (e.g. Cytoscape,
+gephi) or to re-examine clustering thresholds without rerunning minimap2.
+
+### Updating the conda environment
+
+```bash
+# Edit envs/wvdb_build.yml, then:
+mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
+# If mamba fails to solve, try removing and recreating:
+# conda env remove -n wvdb-build
+# conda env create -f envs/wvdb_build.yml
+nextflow run main.nf -stub -profile local
+git add envs/wvdb_build.yml && git commit -m "feat: update conda env"
+```
 
 ### task.ext.publish_dir pattern
 

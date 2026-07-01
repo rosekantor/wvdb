@@ -197,6 +197,7 @@ workflow BLAST_TRIM {
 
     emit:
     complete_fasta       = complete_fasta
+    blast_trim_input     = COLLECT_BLAST_INPUT.out.blast_trim_fasta
     unvalidated_fasta    = COLLECT_UNVALIDATED.out.unvalidated_fasta
     unvalidated_report   = COLLECT_UNVALIDATED.out.unvalidated_report
 }

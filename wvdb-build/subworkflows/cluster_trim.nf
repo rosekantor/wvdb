@@ -89,8 +89,9 @@ workflow CLUSTER_TRIM {
     )
 
     emit:
-    complete_fasta   = PICK_BEST_TRIM.out.complete_fasta
-    blast_trim_fasta = FETCH_BLAST_INPUT_SEQS.out.blast_trim_fasta
-    singletons       = PARSE_CLUSTERS_ALL.out.singletons
-    paf_gz           = MINIMAP2_PAIRWISE.out.paf_gz
+    complete_fasta        = PICK_BEST_TRIM.out.complete_fasta
+    blast_trim_fasta      = FETCH_BLAST_INPUT_SEQS.out.blast_trim_fasta
+    singletons            = PARSE_CLUSTERS_ALL.out.singletons
+    paf_gz                = MINIMAP2_PAIRWISE.out.paf_gz
+    trimming_candidates   = EXTRACT_TRIMMING_SEQS.out.candidates_fasta
 }

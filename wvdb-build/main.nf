@@ -35,6 +35,7 @@ include { VCLUST_CLUSTER   as VCLUST_CLUSTER_RECLUST        } from './modules/vc
 include { GET_CENTROIDS                                     } from './modules/vclust'
 include { CLUSTER_TRIM                                      } from './subworkflows/cluster_trim'
 include { BLAST_TRIM                                        } from './subworkflows/blast_trim'
+include { PIPELINE_SUMMARY                                  } from './modules/summary'
 
 workflow {
 
@@ -171,5 +172,21 @@ workflow {
     GET_CENTROIDS(
         VCLUST_CLUSTER_RECLUST.out.clusters,
         recluster_input
+    )
+
+    // -----------------------------------------------------------------------
+    // Summary report — sequence counts at each step
+    // -----------------------------------------------------------------------
+    PIPELINE_SUMMARY(
+        COLLECT_GENOMES.out.merged_fasta,
+        VCLUST_CLUSTER.out.clusters,
+        CLUSTER_TRIM.out.trimming_candidates,
+        CLUSTER_TRIM.out.complete_fasta,
+        BLAST_TRIM.out.blast_trim_input,
+        BLAST_TRIM.out.complete_fasta,
+        BLAST_TRIM.out.unvalidated_fasta,
+        BLAST_TRIM.out.unvalidated_report,
+        recluster_input,
+        GET_CENTROIDS.out.centroid_fasta
     )
 }
