@@ -29,8 +29,8 @@ workflow BLAST_TRIM {
     singletons_ids        // path: singletons.txt from PARSE_CLUSTERS_ALL
     incomplete_fasta      // path: merged incomplete seqs from cluster_trim step
     all_fasta             // path: filtered_all.fasta
-    refseq_ev_blastdb     // path: RefSeq + EsViritu BLAST db
-    imgvr_blastdb         // path: IMG-VR v5 BLAST db
+    refseq_ev_blastdb     // val:  RefSeq + EsViritu BLAST db path (not staged — index files must be co-located)
+    imgvr_blastdb         // val:  IMG-VR v5 BLAST db path (not staged — index files must be co-located)
     checkvdb              // path: CheckV database
     completeness          // val:  completeness threshold (%)
 

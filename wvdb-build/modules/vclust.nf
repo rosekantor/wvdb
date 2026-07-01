@@ -94,6 +94,9 @@ process VCLUST_CLUSTER {
 
     tag "${ani_tsv.simpleName}"
 
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
     input:
     path ani_tsv    // output of VCLUST_ALIGN
     path ids_tsv    // sequence ID/length file generated in VCLUST_ALIGN
@@ -123,12 +126,12 @@ process VCLUST_CLUSTER {
 }
 
 // ---------------------------------------------------------------------------
-// GET_CENTROIDS  (Step 6 only)
+// GET_CENTROIDS  (Step 5: recluster)
 // ---------------------------------------------------------------------------
 process GET_CENTROIDS {
     label 'cpu_low'
 
-    publishDir "${params.outdir}/6_reclustered", mode: 'copy', enabled: !workflow.stubRun
+    publishDir "${params.outdir}/5_reclustered", mode: 'copy', enabled: !workflow.stubRun
 
     input:
     path clusters

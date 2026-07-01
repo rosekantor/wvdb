@@ -118,7 +118,7 @@ process MINIMAP2_PAIRWISE {
         "${candidates_fasta}" \\
         > alignments.paf
 
-    bgzip -k alignments.paf
+    bgzip -c alignments.paf > alignments.paf.gz
     """
 
     stub:

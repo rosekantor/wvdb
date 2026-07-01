@@ -66,8 +66,16 @@ workflow {
 
     def check = !workflow.stubRun
     checkvdb          = file(params.checkvdb,           checkIfExists: check)
-    refseq_ev_blastdb = file(params.refseq_ev_blastdb,  checkIfExists: check)
-    imgvr_blastdb     = file(params.imgvr_blastdb,      checkIfExists: check)
+    // BLAST dbs passed as strings (not file objects) so Nextflow does not stage
+    // them — this keeps all index files (.nhr .nin .nsq etc.) accessible to blastn
+    refseq_ev_blastdb = params.refseq_ev_blastdb
+    imgvr_blastdb     = params.imgvr_blastdb
+    if (!workflow.stubRun) {
+        if (!file(params.refseq_ev_blastdb).exists())
+            error "refseq_ev_blastdb not found: ${params.refseq_ev_blastdb}"
+        if (!file(params.imgvr_blastdb).exists())
+            error "imgvr_blastdb not found: ${params.imgvr_blastdb}"
+    }
     fastqdir          = file(params.fastqdir,           checkIfExists: check)
 
     // -----------------------------------------------------------------------
@@ -129,7 +137,6 @@ workflow {
     // Step 5 — Recluster all complete representatives
     //   Merges complete outputs from step 3 (branches A + B) and step 4
     // -----------------------------------------------------------------------
-
     recluster_input = CLUSTER_TRIM.out.complete_fasta
         .mix(BLAST_TRIM.out.complete_fasta)
         .collectFile(name: "recluster_input.fasta")

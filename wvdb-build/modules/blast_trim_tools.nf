@@ -65,7 +65,7 @@ process BLASTN {
 
     input:
     path query_fasta          // blast_trim_input.fasta
-    path blastdb              // BLAST db (.fna + index files)
+    val  blastdb              // BLAST db path as val — prevents staging so all index files remain accessible
     val  db_name              // short label: "refseq_ev" or "metavr"
 
     output:
@@ -135,7 +135,7 @@ process TRIM_GENOMES_BLAST {
     input:
     path ani_tsv              // output of BLASTANI
     path query_fasta          // blast_trim_input.fasta
-    path blastdb              // same BLAST db used in BLASTN
+    val  blastdb              // BLAST db path as val — prevents staging so all index files remain accessible
     val  db_name              // "refseq_ev" or "metavr"
 
     output:
