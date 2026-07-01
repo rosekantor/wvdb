@@ -1,9 +1,9 @@
 name: wvdb-build
 # Channel priority: conda-forge first (general deps), then bioconda (bio tools).
 # strict channel priority prevents subtle dependency conflicts.
-# To create:   mamba env create -f envs/wf3.yml
-# To update:   mamba env update -f envs/wf3.yml --prune
-# To activate: conda activate wf3
+# To create:   mamba env create -f envs/wvdb_build.yml
+# To update:   mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
+# To activate: conda activate wvdb-build
 
 channels:
   - conda-forge
@@ -18,14 +18,13 @@ dependencies:
   - bioconda::seqkit=2.9.0
   - bioconda::vclust=1.3.1
   - bioconda::blast=2.16.0        # provides blastn, makeblastdb
-  - bioconda::checkv              # latest (1.1.1+); backward compatible with 1.0.3 db
+  - bioconda::checkv>=1.0.3        # pin to 1.0.3 — newer versions have macOS ARM64 conflicts
   - bioconda::mummer4=4.0.1       # provides nucmer; package name is mummer4 on bioconda
-  - bioconda::minimap2>=2.26       # pairwise alignment replacing nucmer in cluster trim step
-  - bioconda::samtools>=1.18       # provides bgzip (used to compress PAF output)
+  - bioconda::minimap2             # pairwise alignment for cluster trim step (>=2.26)
+  - bioconda::samtools             # provides bgzip (>=1.18)
 
-  # --- checkv hard dependency: pin diamond to avoid older version bug ---
-  # conda can install an older DIAMOND with checkv; >=2.0.9 is required
-  - bioconda::diamond>=2.0.9
+  # --- checkv hard dependency: pin diamond to exact version ---
+  - bioconda::diamond>=2.0.9        # checkv 1.0.3 requires diamond==2.0.9
 
   # --- Python packages used by helper scripts in bin/ ---
   # confirmed from imports: Bio.SeqIO, numpy, pandas
