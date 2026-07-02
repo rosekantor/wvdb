@@ -3,23 +3,25 @@
  * Processes for BLAST-mode reference-guided trimming (step 4).
  *
  * Process list:
- *   COLLECT_BLAST_INPUT  — seqkit grep singletons + cat with cluster-trim incompletes
- *   BLASTN               — blastn search against a reference db
- *   BLASTANI             — compute ANI from blastn tabular output
- *   TRIM_GENOMES_BLAST   — blast-mode trim_genomes.py (uses -a ani_tsv -d blastdb)
- *   MERGE_BLAST_TRIM     — comm-based dedup: refseq_ev hits + metavr-only additions
+ *   COLLECT_BLAST_INPUT    — seqkit grep singletons + cat with cluster-trim incompletes
+ *   GET_QUERY_IDS          — extract sequence IDs from blast_trim_input.fasta
+ *   BLASTN                 — blastn search against a reference db
+ *   BLASTANI               — compute ANI from blastn tabular output
+ *   SELECT_BEST_BLAST_HIT  — route queries: initial db preferred; secondary if no initial hit
+ *   TRIM_GENOMES_BLAST     — nucmer-based trimming from ANI TSV + reference db FASTA
+ *   MERGE_TRIMMED          — cat initial + secondary trimmed FASTAs (queries are disjoint)
+ *   COLLECT_UNVALIDATED    — gather no-hit + incomplete seqs → unvalidated output
  *
  * publishDir paths use task.ext.publish_dir set via nextflow.config withName selectors.
  *
  * Tools required in PATH:
  *   seqkit v2.9.0+, blastn v2.16.0+
- *   blastani_nayfach.py, trim_genomes.py (via bin/)
+ *   blastani_nayfach.py, trim_genomes.py, select_best_blast_hit.py,
+ *   collect_unvalidated.py (via bin/)
  */
 
 // ---------------------------------------------------------------------------
 // COLLECT_BLAST_INPUT
-// Greps singletons from the full FASTA and concatenates with cluster-trim
-// incomplete sequences to form the full blast-trim input set.
 // ---------------------------------------------------------------------------
 process COLLECT_BLAST_INPUT {
     label 'cpu_low'
@@ -28,9 +30,9 @@ process COLLECT_BLAST_INPUT {
         enabled: !workflow.stubRun
 
     input:
-    path singletons_ids       // cluster_singletons.txt from PARSE_CLUSTERS_ALL
-    path incomplete_fasta     // merged incomplete seqs from cluster_trim step
-    path all_fasta            // filtered_all.fasta
+    path singletons_ids
+    path incomplete_fasta
+    path all_fasta
 
     output:
     path "blast_trim_input.fasta", emit: blast_trim_fasta
@@ -53,7 +55,33 @@ process COLLECT_BLAST_INPUT {
 }
 
 // ---------------------------------------------------------------------------
+// GET_QUERY_IDS
+// Extracts sequence IDs from blast_trim_input.fasta for SELECT_BEST_BLAST_HIT.
+// ---------------------------------------------------------------------------
+process GET_QUERY_IDS {
+    label 'cpu_low'
+
+    input:
+    path blast_trim_fasta
+
+    output:
+    path "blast_trim_input_ids.txt", emit: query_ids
+
+    script:
+    """
+    seqkit seq -n "${blast_trim_fasta}" > blast_trim_input_ids.txt
+    """
+
+    stub:
+    """
+    touch blast_trim_input_ids.txt
+    """
+}
+
+// ---------------------------------------------------------------------------
 // BLASTN
+// db_name val used for output naming: "initial" or "secondary"
+// blastdb is val (not path) so index files are not staged away from the db dir
 // ---------------------------------------------------------------------------
 process BLASTN {
     label 'cpu_high'
@@ -64,9 +92,9 @@ process BLASTN {
         enabled: !workflow.stubRun
 
     input:
-    path query_fasta          // blast_trim_input.fasta
-    path blastdb              // BLAST db (.fna + index files)
-    val  db_name              // short label: "refseq_ev" or "metavr"
+    path query_fasta
+    val  blastdb              // BLAST db path as val — index files must be co-located
+    val  db_name              // "initial" or "secondary"
 
     output:
     path "${db_name}.blastn.tsv", emit: blastn_tsv
@@ -120,9 +148,50 @@ process BLASTANI {
 }
 
 // ---------------------------------------------------------------------------
+// SELECT_BEST_BLAST_HIT
+// Routes each query to the initial or secondary db hit.
+// Initial db is preferred when both have hits; secondary used only for queries
+// with no initial hit. Queries with no hit in either db → no_hit_ids.txt.
+// secondary_ani may be an empty file when run_secondary_blast=false.
+// ---------------------------------------------------------------------------
+process SELECT_BEST_BLAST_HIT {
+    label 'cpu_low'
+
+    publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
+        enabled: !workflow.stubRun
+
+    input:
+    path initial_ani_tsv      // ANI TSV from BLASTANI (initial db)
+    path secondary_ani_tsv    // ANI TSV from BLASTANI_SECONDARY (may be empty)
+    path query_ids            // blast_trim_input_ids.txt from GET_QUERY_IDS
+
+    output:
+    path "initial_hits.tsv",     emit: initial_hits
+    path "secondary_hits.tsv",   emit: secondary_hits
+    path "no_hit_ids.txt",       emit: no_hit_ids
+
+    script:
+    """
+    select_best_blast_hit.py \\
+        --initial-ani   "${initial_ani_tsv}" \\
+        --secondary-ani "${secondary_ani_tsv}" \\
+        --initial-out   initial_hits.tsv \\
+        --secondary-out secondary_hits.tsv \\
+        --no-hit-ids    no_hit_ids.txt \\
+        --all-query-ids "${query_ids}"
+    """
+
+    stub:
+    """
+    touch initial_hits.tsv secondary_hits.tsv no_hit_ids.txt
+    """
+}
+
+// ---------------------------------------------------------------------------
 // TRIM_GENOMES_BLAST
-// Blast-mode trim_genomes.py: uses -a ani_tsv and -d blastdb.
-// db_name scopes output filenames to avoid collisions in MERGE_BLAST_TRIM.
+// Nucmer-based trimming from ANI TSV + reference db FASTA.
+// Called twice (initial, secondary) via aliases in blast_trim.nf.
+// db_name scopes output filenames to avoid collisions in MERGE_TRIMMED.
 // ---------------------------------------------------------------------------
 process TRIM_GENOMES_BLAST {
     label 'cpu_high'
@@ -133,10 +202,10 @@ process TRIM_GENOMES_BLAST {
         enabled: !workflow.stubRun
 
     input:
-    path ani_tsv              // output of BLASTANI
-    path query_fasta          // blast_trim_input.fasta
-    path blastdb              // same BLAST db used in BLASTN
-    val  db_name              // "refseq_ev" or "metavr"
+    path ani_tsv
+    path query_fasta
+    val  blastdb              // BLAST db FASTA path as val
+    val  db_name              // "initial" or "secondary"
 
     output:
     path "${db_name}.trimmed.fasta", emit: trimmed_fasta
@@ -162,45 +231,75 @@ process TRIM_GENOMES_BLAST {
 }
 
 // ---------------------------------------------------------------------------
-// MERGE_BLAST_TRIM
-// Deduplicates trimmed outputs: keep all refseq_ev trimmed sequences plus
-// any metavr-trimmed sequences not already covered by refseq_ev.
+// MERGE_TRIMMED
+// Simple cat of initial + secondary trimmed FASTAs.
+// Queries are guaranteed disjoint by SELECT_BEST_BLAST_HIT so no dedup needed.
 // ---------------------------------------------------------------------------
-process MERGE_BLAST_TRIM {
+process MERGE_TRIMMED {
     label 'cpu_low'
 
     publishDir { "${params.outdir}/${task.ext.publish_dir}" }, mode: 'copy',
         enabled: !workflow.stubRun
 
     input:
-    path refseq_ev_trimmed    // *.trimmed.fasta from TRIM_GENOMES_BLAST (refseq_ev)
-    path refseq_ev_bed        // *.trimming.bed  from TRIM_GENOMES_BLAST (refseq_ev)
-    path metavr_trimmed       // *.trimmed.fasta from TRIM_GENOMES_BLAST (metavr)
-    path metavr_bed           // *.trimming.bed  from TRIM_GENOMES_BLAST (metavr)
+    path initial_trimmed      // initial.trimmed.fasta
+    path secondary_trimmed    // secondary.trimmed.fasta (may be empty)
 
     output:
-    path "blast_trim_merged.fasta", emit: trimmed_fasta
+    path "blast_trimmed.fasta", emit: trimmed_fasta
 
     script:
     """
-    awk '{print \$1}' "${refseq_ev_bed}" | LC_ALL=C sort > refseq_ev_hits_sorted.txt
-    awk '{print \$1}' "${metavr_bed}"    | LC_ALL=C sort > metavr_hits_sorted.txt
+    cat "${initial_trimmed}" > blast_trimmed.fasta
+    if [[ -s "${secondary_trimmed}" ]]; then
+        cat "${secondary_trimmed}" >> blast_trimmed.fasta
+    fi
 
-    # IDs trimmed by metavr but NOT by refseq_ev
-    LC_ALL=C comm -13 refseq_ev_hits_sorted.txt metavr_hits_sorted.txt > metavr_only_ids.txt
-
-    seqkit grep -f metavr_only_ids.txt "${metavr_trimmed}" > metavr_only.fasta
-
-    cat "${refseq_ev_trimmed}" metavr_only.fasta > blast_trim_merged.fasta
-
-    [[ -s blast_trim_merged.fasta ]] || {
-        echo "ERROR: blast_trim_merged.fasta is empty" >&2
+    [[ -s blast_trimmed.fasta ]] || {
+        echo "ERROR: blast_trimmed.fasta is empty" >&2
         exit 1
     }
     """
 
     stub:
     """
-    touch blast_trim_merged.fasta
+    touch blast_trimmed.fasta
+    """
+}
+
+// ---------------------------------------------------------------------------
+// COLLECT_UNVALIDATED
+// Gathers all sequences that could not be validated into a single FASTA
+// with a summary report. Sequences are written in their UNTRIMMED form.
+// Sources: no BLAST hit + incomplete after CheckV trimming.
+// ---------------------------------------------------------------------------
+process COLLECT_UNVALIDATED {
+    label 'cpu_low'
+
+    publishDir "${params.outdir}/unvalidated", mode: 'copy',
+        enabled: !workflow.stubRun
+
+    input:
+    path no_hit_ids           // no_hit_ids.txt from SELECT_BEST_BLAST_HIT
+    path incomplete_ids       // incomplete IDs from COMPLETENESS_FILTER
+    path all_fasta            // filtered_all.fasta
+
+    output:
+    path "unvalidated_genomes.fasta", emit: unvalidated_fasta
+    path "unvalidated_report.tsv",    emit: unvalidated_report
+
+    script:
+    """
+    collect_unvalidated.py \\
+        --no-hit-ids     "${no_hit_ids}" \\
+        --incomplete-ids "${incomplete_ids}" \\
+        --all-fasta      "${all_fasta}" \\
+        --out-fasta      unvalidated_genomes.fasta \\
+        --out-report     unvalidated_report.tsv
+    """
+
+    stub:
+    """
+    touch unvalidated_genomes.fasta unvalidated_report.tsv
     """
 }

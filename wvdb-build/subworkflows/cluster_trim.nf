@@ -2,44 +2,37 @@
  * subworkflows/cluster_trim.nf
  * Step 3: Cluster-based trimming pipeline.
  *
- * Three sequential branches:
- *
- *   Branch A (parallel trim12 + trim13):
- *     PARSE_CLUSTERS_ALL → EXTRACT_TRIMMING_SEQS
- *         ↓──────────────────┐
- *     TRIM_GENOMES (trim12)  TRIM_GENOMES_13 (trim13)   ← parallel
- *         └──────────────────┘
- *         PREPARE_CHECKV_INPUT → CHECKV → PICK_BEST_TRIM1
- *
- *   Branch B (sequential, incomplete rank1 subset only):
- *     FILTER_PAIRS23 → TRIM_GENOMES_23 → CHECKV_TRIM23 → COMPLETENESS_FILTER_TRIM23
- *
- *   Outputs to step 4 (blast_trim):
- *     FETCH_BLAST_INPUT_SEQS  — 2-member cluster trim1 failures
- *     COMPLETENESS_FILTER_TRIM23.incomplete_fasta  — trim23 failures
- *     singletons              — 1-member clusters
+ * DAG:
+ *   PARSE_CLUSTERS_ALL
+ *       ↓
+ *   EXTRACT_TRIMMING_SEQS
+ *       ↓
+ *   MINIMAP2_PAIRWISE          ← all-vs-all on rank1/2/3 candidates
+ *       ↓
+ *   TRIM_FROM_PAF              ← picks best alignment per cluster across
+ *                                 pairs12, pairs13, pairs23 by alignment
+ *                                 block length; one trimmed.fasta output
+ *       ↓
+ *   CHECKV                     ← one run, no duplicate IDs
+ *       ↓
+ *   PICK_BEST_TRIM             ← complete → recluster | incomplete → blast_trim
+ *       ↓
+ *   FETCH_BLAST_INPUT_SEQS     ← retrieve untrimmed seqs for blast_trim step
  *
  * Emits:
- *   complete_fasta      — complete reps from branch A     → step 5 (recluster)
- *   complete_fasta23    — complete reps from branch B     → step 5 (recluster)
- *   blast_trim_fasta    — untrimmed seqs from 2-member failures → step 4
- *   blast_trim_fasta23  — untrimmed seqs from branch B failures → step 4
- *   singletons          — 1-member cluster IDs             → step 4
+ *   complete_fasta   — complete trimmed representatives  → step 5 (recluster)
+ *   blast_trim_fasta — untrimmed incomplete sequences    → step 4 (blast_trim)
+ *   singletons       — 1-member cluster IDs              → step 4 (blast_trim)
+ *   paf_gz           — bgzipped PAF for network analysis
  */
 
-include { PARSE_CLUSTERS_ALL                                   } from '../modules/cluster_trim_tools'
-include { EXTRACT_TRIMMING_SEQS                                } from '../modules/cluster_trim_tools'
-include { TRIM_GENOMES                                         } from '../modules/cluster_trim_tools'
-include { TRIM_GENOMES    as TRIM_GENOMES_13                   } from '../modules/cluster_trim_tools'
-include { TRIM_GENOMES    as TRIM_GENOMES_23                   } from '../modules/cluster_trim_tools'
-include { PREPARE_CHECKV_INPUT                                 } from '../modules/cluster_trim_tools'
-include { PICK_BEST_TRIM1                                      } from '../modules/cluster_trim_tools'
-include { FETCH_BLAST_INPUT_SEQS                               } from '../modules/cluster_trim_tools'
-include { FILTER_PAIRS23                                       } from '../modules/cluster_trim_tools'
-include { CHECKV                                               } from '../modules/cluster_trim_tools'
-include { CHECKV          as CHECKV_TRIM23                     } from '../modules/cluster_trim_tools'
-include { COMPLETENESS_FILTER                                  } from '../modules/cluster_trim_tools'
-include { COMPLETENESS_FILTER as COMPLETENESS_FILTER_TRIM23    } from '../modules/cluster_trim_tools'
+include { PARSE_CLUSTERS_ALL    } from '../modules/cluster_trim_tools'
+include { EXTRACT_TRIMMING_SEQS } from '../modules/cluster_trim_tools'
+include { MINIMAP2_PAIRWISE     } from '../modules/cluster_trim_tools'
+include { TRIM_FROM_PAF         } from '../modules/cluster_trim_tools'
+include { CHECKV                } from '../modules/cluster_trim_tools'
+include { PICK_BEST_TRIM        } from '../modules/cluster_trim_tools'
+include { FETCH_BLAST_INPUT_SEQS } from '../modules/cluster_trim_tools'
 
 workflow CLUSTER_TRIM {
 
@@ -51,102 +44,54 @@ workflow CLUSTER_TRIM {
 
     main:
 
-    // -----------------------------------------------------------------------
-    // Shared setup: parse clusters + extract trimming candidates
-    // -----------------------------------------------------------------------
+    // Parse clusters → all pair files + candidate IDs in one pass
     PARSE_CLUSTERS_ALL(
         clusters,
         lengths
     )
 
+    // Extract rank1/2/3 sequences for minimap2
     EXTRACT_TRIMMING_SEQS(
         PARSE_CLUSTERS_ALL.out.candidate_ids,
         all_fasta
     )
 
-    // -----------------------------------------------------------------------
-    // Branch A: trim12 and trim13 run in parallel
-    // Both use the pre-indexed trimming_candidates.fasta via trim_genomes.py
-    // -----------------------------------------------------------------------
-    TRIM_GENOMES(
+    // All-vs-all minimap2 on trimming candidates
+    MINIMAP2_PAIRWISE(
+        EXTRACT_TRIMMING_SEQS.out.candidates_fasta
+    )
+
+    // Pick best alignment per cluster across pairs12/13/23, write trimmed FASTA
+    TRIM_FROM_PAF(
+        MINIMAP2_PAIRWISE.out.paf,
         PARSE_CLUSTERS_ALL.out.pairs12,
-        EXTRACT_TRIMMING_SEQS.out.candidates_fasta,
-        "trim12"
-    )
-
-    TRIM_GENOMES_13(
         PARSE_CLUSTERS_ALL.out.pairs13,
-        EXTRACT_TRIMMING_SEQS.out.candidates_fasta,
-        "trim13"
+        PARSE_CLUSTERS_ALL.out.pairs23,
+        EXTRACT_TRIMMING_SEQS.out.candidates_fasta
     )
 
-    // Prepare combined FASTA with suffixed IDs for CheckV
-    // Both trim12 and trim13 assessed together so completeness drives selection
-    PREPARE_CHECKV_INPUT(
-        TRIM_GENOMES.out.trimmed_fasta,
-        TRIM_GENOMES_13.out.trimmed_fasta
-    )
-
-    // CheckV on combined trim1 candidates (<rank1_id>_trim12 and _trim13)
+    // CheckV quality assessment on trimmed sequences
     CHECKV(
-        PREPARE_CHECKV_INPUT.out.checkv_input_fasta,
+        TRIM_FROM_PAF.out.trimmed_fasta,
         checkvdb
     )
 
-    // Split by completeness:
-    //   complete            → step 5 (recluster)
-    //   incomplete_ids      → branch B (trim23)
-    //   blast_trim_ids      → step 4 (blast_trim); 2-member clusters with no rank3
-    PICK_BEST_TRIM1(
-        TRIM_GENOMES.out.trimmed_fasta,
-        TRIM_GENOMES_13.out.trimmed_fasta,
-        CHECKV.out.quality_summary,
-        PARSE_CLUSTERS_ALL.out.pairs12,
-        PARSE_CLUSTERS_ALL.out.pairs13
+    // Split by completeness
+    PICK_BEST_TRIM(
+        TRIM_FROM_PAF.out.trimmed_fasta,
+        CHECKV.out.quality_summary
     )
 
-    // Retrieve untrimmed seqs for 2-member cluster failures → step 4
+    // Retrieve untrimmed sequences for blast_trim step
     FETCH_BLAST_INPUT_SEQS(
-        PICK_BEST_TRIM1.out.blast_trim_ids,
+        PICK_BEST_TRIM.out.blast_trim_ids,
         all_fasta
     )
 
-    // -----------------------------------------------------------------------
-    // Branch B: trim23 runs sequentially, only on incomplete rank1 clusters
-    // FILTER_PAIRS23 restricts pairs23.tsv before nucmer runs, saving compute
-    // -----------------------------------------------------------------------
-    FILTER_PAIRS23(
-        PARSE_CLUSTERS_ALL.out.pairs23,
-        PARSE_CLUSTERS_ALL.out.pairs12,
-        PICK_BEST_TRIM1.out.incomplete_ids
-    )
-
-    TRIM_GENOMES_23(
-        FILTER_PAIRS23.out.pairs23_filtered,
-        EXTRACT_TRIMMING_SEQS.out.candidates_fasta,
-        "trim23"
-    )
-
-    CHECKV_TRIM23(
-        TRIM_GENOMES_23.out.trimmed_fasta,
-        checkvdb
-    )
-
-    // Split trim23 by completeness:
-    //   complete            → step 5 (recluster)
-    //   incomplete_fasta    → step 4 (blast_trim)
-    COMPLETENESS_FILTER_TRIM23(
-        CHECKV_TRIM23.out.quality_summary,
-        TRIM_GENOMES_23.out.trimmed_fasta,
-        all_fasta,
-        params.completeness,
-        true    // emit untrimmed incomplete seqs for blast_trim step
-    )
-
     emit:
-    complete_fasta      = PICK_BEST_TRIM1.out.complete_fasta
-    complete_fasta23    = COMPLETENESS_FILTER_TRIM23.out.complete_fasta
-    blast_trim_fasta    = FETCH_BLAST_INPUT_SEQS.out.blast_trim_fasta
-    blast_trim_fasta23  = COMPLETENESS_FILTER_TRIM23.out.incomplete_fasta
-    singletons          = PARSE_CLUSTERS_ALL.out.singletons
+    complete_fasta        = PICK_BEST_TRIM.out.complete_fasta
+    blast_trim_fasta      = FETCH_BLAST_INPUT_SEQS.out.blast_trim_fasta
+    singletons            = PARSE_CLUSTERS_ALL.out.singletons
+    paf_gz                = MINIMAP2_PAIRWISE.out.paf_gz
+    trimming_candidates   = EXTRACT_TRIMMING_SEQS.out.candidates_fasta
 }

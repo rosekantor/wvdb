@@ -52,18 +52,56 @@ def initialize(query_fasta, outdir):
 
 def build_faidx(fasta_path, threads):
     """
-    Run `seqkit faidx <fasta>` to build the .fai index file.
-    This is called once per input FASTA before parallel pair extraction,
-    so that all concurrent seqkit faidx <fasta> <id> calls share a
-    pre-built index rather than each rebuilding it.
+    Build a seqkit .fai index for fasta_path if one does not already exist.
+    Skipping the rebuild saves significant time for large databases (100s of GB).
     Returns True on success, False on failure.
     """
+    fai_path = fasta_path + ".fai"
+    if os.path.isfile(fai_path):
+        print(f"  faidx already exists, skipping: {fai_path}", file=sys.stderr)
+        return True
     cmd = ["seqkit", "faidx", fasta_path, "--threads", str(threads)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"Error building faidx for {fasta_path}: {result.stderr}", file=sys.stderr)
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Pre-extract all target sequences in one seqkit call
+# ---------------------------------------------------------------------------
+
+def extract_targets(pairs_df, target_fasta, fastadir, threads):
+    """
+    Extract all unique target sequences from target_fasta in a single
+    seqkit faidx call, writing them to a small per-targets FASTA.
+    This avoids N individual subprocess calls against the large database
+    during parallel nucmer alignment.
+    Returns path to the extracted targets FASTA, or None on failure.
+    """
+    targets = pairs_df['tname'].unique().tolist()
+    targets_fasta = os.path.join(fastadir, 'all_targets.fasta')
+
+    # Write target IDs to a temp file for seqkit grep
+    ids_file = os.path.join(fastadir, 'target_ids.txt')
+    with open(ids_file, 'w') as f:
+        for t in targets:
+            f.write(t + '\n')
+
+    cmd = ['seqkit', 'grep', '-f', ids_file, target_fasta,
+           '-o', targets_fasta, '--threads', str(threads)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"Error extracting target sequences: {result.stderr}", file=sys.stderr)
+        return None
+
+    print(f"  Pre-extracted {len(targets)} target sequences → {targets_fasta}",
+          file=sys.stderr)
+
+    # Build faidx on the small targets FASTA for fast per-pair access
+    build_faidx(targets_fasta, threads)
+    return targets_fasta
 
 
 # ---------------------------------------------------------------------------
@@ -289,16 +327,22 @@ def main():
     fastadir = os.path.join(outdir, 'pairs')
     alndir   = os.path.join(outdir, 'aln')
 
-    # --- Step 2: pre-build faidx indices ONCE on both FASTAs ---
-    # This is the key improvement: indexing the small candidates FASTA once
-    # means all N parallel workers can call `seqkit faidx <fasta> <id>`
-    # without each one rebuilding the index from scratch.
+    # --- Step 2: prepare FASTAs for parallel per-pair extraction ---
     print(f"Building faidx index: {query_fasta}", file=sys.stderr)
     if not build_faidx(query_fasta, threads):
         sys.exit(1)
 
     if target_fasta != query_fasta:
-        print(f"Building faidx index: {target_fasta}", file=sys.stderr)
+        # BLAST mode: pre-extract all needed target sequences into a small
+        # FASTA in one seqkit call. Workers then extract from this small file
+        # rather than making individual calls to the large database.
+        print(f"Pre-extracting target sequences from: {target_fasta}", file=sys.stderr)
+        extracted = extract_targets(pairs_df, target_fasta, fastadir, threads)
+        if extracted is None:
+            sys.exit(1)
+        target_fasta = extracted
+    else:
+        # Cluster mode: query and target are the same small candidates FASTA
         if not build_faidx(target_fasta, threads):
             sys.exit(1)
 
