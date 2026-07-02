@@ -203,10 +203,19 @@ activates the conda environment for every submitted job. This is required
 because SLURM jobs do not inherit the interactive `conda activate`.
 
 For clusters where `DefMemPerNode=UNLIMITED` (memory not tracked per job),
-use `slurm_nomem` instead of `slurm` to avoid memory specification errors:
+use the `slurm_nomem` profile instead of `slurm`. This is a custom profile
+defined in `nextflow.config` that omits the `--mem` flag from sbatch submissions,
+letting SLURM manage memory allocation automatically:
 
 ```bash
 nextflow run main.nf -profile slurm_nomem,conda ...
+```
+
+For the dedicated 128-CPU / 2TB cluster nodes, use the `cluster` profile which
+requests full exclusive node access and sets threads/memory accordingly:
+
+```bash
+nextflow run main.nf -profile cluster,conda     --fastqdir          /path/to/fastq     --outdir            /path/to/results     --checkvdb          /path/to/checkv-db     --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna     -resume
 ```
 
 ### Initial BLAST database only (no secondary)
@@ -358,7 +367,12 @@ All index files must be present in the same directory as the `.fna` file.
 | Cluster config | Profile to use | Notes |
 |---|---|---|
 | `DefMemPerCPU` set | `slurm` | Explicit `--mem` requests work normally |
-| `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Omits `--mem` flag; SLURM manages allocation |
+| `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Custom profile — omits `--mem`; SLURM manages allocation |
+| 128-CPU / 2TB exclusive nodes | `cluster` | Custom profile — `--exclusive`, 128 CPUs, memory=null |
+
+All three are custom profiles defined in `nextflow.config` under the `profiles {}` block.
+`slurm_nomem` and `cluster` both set `process.memory = null` since those machines
+have `DefMemPerNode=UNLIMITED`.
 
 Override memory caps at runtime for either profile:
 ```bash
