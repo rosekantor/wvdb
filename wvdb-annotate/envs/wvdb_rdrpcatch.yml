@@ -1,0 +1,25 @@
+name: rdrpcatch
+# Separate environment for RdRPCATCH — requires Python 3.12.
+# Cannot be merged with wvdb-annotate (Python 3.11).
+#
+# To create:
+#   conda create -n rdrpcatch -c bioconda rdrpcatch
+# OR:
+#   mamba env create -f envs/wvdb_rdrpcatch.yml
+#
+# After creation, download the databases:
+#   conda activate rdrpcatch
+#   rdrpcatch databases --destination-dir /path/to/rdrp_catch_db
+#
+# To activate: conda activate rdrpcatch
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  - python=3.12
+  - bioconda::rdrpcatch
+  - bioconda::mmseqs2=17.b804f
+  - bioconda::seqkit=2.10.0

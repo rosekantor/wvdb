@@ -1,0 +1,34 @@
+name: wvdb-annotate
+# Channel priority: conda-forge first, then bioconda.
+# To create:   mamba env create -f envs/wvdb_annotate.yml
+# To update:   mamba env update -n wvdb-annotate -f envs/wvdb_annotate.yml --prune
+# To activate: conda activate wvdb-annotate
+#
+# Note: RdRPCATCH requires Python 3.12 and must be installed in a
+# separate conda environment named 'rdrpcatch'. See README for setup.
+# The RDRPCATCH process uses its own conda env via nextflow.config.
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  # --- Python runtime ---
+  - python=3.11
+
+  # --- Core annotation tools ---
+  - bioconda::checkv>=1.0.3         # genome completeness + quality
+  - bioconda::genomad>=1.8.0        # virus classification + gene prediction
+  - bioconda::blast=2.16.0          # blastn for nucleotide searches
+  - bioconda::diamond>=2.0.9        # protein search vs NCBI-nr (scaffolded)
+
+  # --- Python packages ---
+  - conda-forge::biopython>=1.80    # Bio.SeqIO, Bio.Entrez
+  - conda-forge::pandas>=1.5
+  - conda-forge::numpy>=1.23
+  - conda-forge::requests           # for LLM API calls in guess_host.py
+
+  # --- Nextflow runtime ---
+  - conda-forge::openjdk=17
+  - bioconda::nextflow>=23.10
