@@ -27,36 +27,37 @@ process MERGE_ANNOTATIONS {
         enabled: !workflow.stubRun
 
     input:
-    path input_fasta
     path checkv_quality           // checkv_out/quality_summary.tsv
     path genomad_virus_summary    // genomad virus_summary.tsv
-    path rdrpcatch_tsv            // rdrpcatch results TSV (or NO_FILE)
-    path blastn_ani_tsvs          // collected ANI TSVs from all BLASTANI runs
-    path diamond_tsv              // diamond_out.tsv (or NO_FILE)
-    path rnavirhost_tsv           // rnavirhost predictions TSV (or NO_FILE)
+    path ictv_fam                 // ref_data/ictv_families.tsv
+    path blastn_ani_tsvs          // <db_name>.blastn.ani.tsv files (collected, or NO_FILE_BLASTN)
+    path rdrpcatch_tsv            // rdrpcatch annotated TSV (or NO_FILE_RDRPCATCH)
+    path rnavirhost_tsv           // rnavirhost result.csv (or NO_FILE_RNAVIRHOST)
 
     output:
-    path "merged_annotations.tsv", emit: merged_tsv
+    path "merged_annotations.tsv",  emit: merged_tsv
+    path "host_lineage_cache.tsv",  emit: host_lineage_cache, optional: true
 
     script:
-    def rdrp_arg     = !rdrpcatch_tsv.name.startsWith('NO_FILE') ? "--rdrpcatch ${rdrpcatch_tsv}"   : ""
-    def diamond_arg  = !diamond_tsv.name.startsWith('NO_FILE') ? "--diamond   ${diamond_tsv}"     : ""
-    def rnavirh_arg  = !rnavirhost_tsv.name.startsWith('NO_FILE') ? "--rnavirhost ${rnavirhost_tsv}" : ""
+    def blastn_arg  = !(blastn_ani_tsvs instanceof List ? blastn_ani_tsvs[0] : blastn_ani_tsvs).name.startsWith('NO_FILE') ? "--blastn-dir ." : ""
+    def rdrp_arg    = !rdrpcatch_tsv.name.startsWith('NO_FILE')  ? "--rdrpcatch  ${rdrpcatch_tsv}"  : ""
+    def rnavirh_arg = !rnavirhost_tsv.name.startsWith('NO_FILE') ? "--rnavirhost ${rnavirhost_tsv}" : ""
     """
     merge_annotations.py \\
-        --fasta        "${input_fasta}" \\
         --checkv       "${checkv_quality}" \\
         --genomad      "${genomad_virus_summary}" \\
-        --blastn-dir   . \\
+        --ictv-fam     "${ictv_fam}" \\
+        --entrez-email "${params.entrez_email}" \\
+        ${blastn_arg} \\
         ${rdrp_arg} \\
-        ${diamond_arg} \\
         ${rnavirh_arg} \\
+        --host-lineage-cache host_lineage_cache.tsv \\
         --out          merged_annotations.tsv
     """
 
     stub:
     """
-    touch merged_annotations.tsv
+    touch merged_annotations.tsv host_lineage_cache.tsv
     """
 }
 
@@ -132,5 +133,41 @@ process ANNOTATION_SUMMARY {
     stub:
     """
     touch annotation_summary.tsv annotation_summary.md
+    """
+}
+
+// ---------------------------------------------------------------------------
+// PREPARE_ICTV
+// One-time utility process to process a manually saved ICTV family HTML page.
+// To obtain the input:
+//   1. Open https://ictv.global/virus-properties in your browser
+//   2. Set 'Items per page' to 'All'
+//   3. File → Save Page As → save as HTML
+//   4. Pass the saved file via --ictv_raw
+// Run: nextflow run main.nf --prepare_ictv true \
+//          --ictv_raw /path/to/saved.html --outdir /path/to/ref_data
+// Re-run when a new ICTV release is available.
+// ---------------------------------------------------------------------------
+process PREPARE_ICTV {
+    label 'cpu_low'
+
+    publishDir "${params.outdir}/ref_data", mode: 'copy',
+        enabled: !workflow.stubRun
+
+    input:
+    path ictv_raw_tsv   // manually downloaded TSV, or NO_FILE to auto-download
+
+    output:
+    path "ictv_families.tsv", emit: ictv_tsv
+
+    script:
+    def in_arg = ictv_raw_tsv.name.startsWith('NO_FILE') ? '' : "--in ${ictv_raw_tsv}"
+    """
+    prepare_ictv.py ${in_arg} --out ictv_families.tsv
+    """
+
+    stub:
+    """
+    touch ictv_families.tsv
     """
 }

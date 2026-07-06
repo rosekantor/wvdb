@@ -330,6 +330,41 @@ outdir/
 
 ---
 
+## Updating reference data
+
+### ICTV family table
+
+A processed copy of the ICTV Virus Properties By Family table is bundled
+in `ref_data/ictv_families.tsv` (MSL accessed January 2026). The pipeline
+uses this file by default — no setup required for most users.
+
+To update when a new ICTV release is available:
+
+**Step 1 — Save the HTML page manually:**
+1. Open https://ictv.global/virus-properties in your browser
+2. Set "Items per page" to "All" (bottom of page) to load all families
+3. File → Save Page As → save as HTML
+
+**Step 2 — Process and commit:**
+```bash
+nextflow run main.nf --prepare_ictv true \
+    --ictv_raw /path/to/Virus_Properties___ICTV.html \
+    --outdir   wvdb-annotate/ref_data
+git add ref_data/ictv_families.tsv
+git commit -m "ref: update ICTV family table to MSL <version>"
+```
+
+> **Note on new host mappings:** ICTV occasionally adds new host combination
+> strings (e.g. `"fungi, plants, vertebrates"`) that are not yet in the
+> mapping table in `bin/prepare_ictv.py`. When this happens, `prepare_ictv.py`
+> will print a warning listing the unmapped values and their
+> `host_ICTV_simple` will be null in the output. To fix, add the new
+> combination to the `HOST_REASSIGN` list in `bin/prepare_ictv.py` and rerun.
+> The categories used are: `archaea`, `bacteria`, `fungi`, `invertebrates`,
+> `plants`, `protists`, `vertebrates`, `non-vertebrates`, `incl-vertebrates`.
+
+---
+
 ## Development notes
 
 ### Running from the correct directory

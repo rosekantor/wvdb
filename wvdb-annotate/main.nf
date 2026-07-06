@@ -39,11 +39,32 @@ include { BLASTN             } from './modules/blastn_tools'
 include { BLASTANI           } from './modules/blastn_tools'
 include { DIAMOND            } from './modules/diamond'
 include { RNAVIRHOST         } from './modules/rnavirhost'
+include { PREPARE_ICTV       } from './modules/summary'
 include { MERGE_ANNOTATIONS  } from './modules/summary'
 include { GUESS_HOST         } from './modules/summary'
 include { ANNOTATION_SUMMARY } from './modules/summary'
 
 workflow {
+
+    // -----------------------------------------------------------------------
+    // PREPARE_ICTV mode — run with --prepare_ictv true to generate the ICTV
+    // reference file without running the full annotation workflow.
+    //
+    // Usage (auto-download):
+    //   nextflow run main.nf --prepare_ictv true --outdir /path/to/ref_data
+    //
+    // Usage (manual download):
+    //   nextflow run main.nf --prepare_ictv true \
+    //       --outdir /path/to/ref_data \
+    //       --ictv_raw /path/to/ictv_VirusPropertiesByFamily.tsv
+    // -----------------------------------------------------------------------
+    if ( params.prepare_ictv ) {
+        raw_tsv = params.ictv_raw
+            ? Channel.fromPath(params.ictv_raw, checkIfExists: !workflow.stubRun)
+            : Channel.of(file('NO_FILE_ICTV_RAW'))
+        PREPARE_ICTV(raw_tsv)
+        return
+    }
 
     // -----------------------------------------------------------------------
     // Parameter validation
@@ -153,12 +174,13 @@ workflow {
             BLASTN.out.blastn_result
         )
 
-        // Collect all ANI TSVs into one channel for MERGE_ANNOTATIONS
+        // Collect all ANI TSVs for MERGE_ANNOTATIONS
+        // merge_annotations.py receives them as a flat list staged in the work dir
         blastn_ani_tsvs = BLASTANI.out.ani_result
             .map { db_name, tsv -> tsv }
             .collect()
     } else {
-        blastn_ani_tsvs = Channel.of(file('NO_FILE')).collect()
+        blastn_ani_tsvs = Channel.of(file('NO_FILE_BLASTN'))
     }
 
     // -----------------------------------------------------------------------
@@ -194,12 +216,11 @@ workflow {
     // Step 7 — Merge all annotations
     // -----------------------------------------------------------------------
     MERGE_ANNOTATIONS(
-        input_fasta,
         CHECKV.out.quality_summary,
         GENOMAD.out.virus_summary,
-        rdrpcatch_tsv,
+        file(params.ictv_fam),
         blastn_ani_tsvs,
-        diamond_tsv,
+        rdrpcatch_tsv,
         rnavirhost_tsv
     )
 
@@ -227,3 +248,4 @@ workflow {
         host_tsv
     )
 }
+

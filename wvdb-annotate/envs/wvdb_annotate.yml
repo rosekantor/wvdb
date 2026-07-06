@@ -28,6 +28,7 @@ dependencies:
   - conda-forge::pandas>=1.5
   - conda-forge::numpy>=1.23
   - conda-forge::requests           # for LLM API calls in guess_host.py
+  - conda-forge::lxml
 
   # --- Nextflow runtime ---
   - conda-forge::openjdk=17
