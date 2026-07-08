@@ -1,0 +1,27 @@
+name: rnavirhost
+# Separate environment for RNAVirHost — requires pinned ML dependency versions.
+# RNAVirHost's models were serialized with specific pandas/sklearn/xgboost versions;
+# using newer versions can cause silent errors or crashes.
+#
+# To create:
+#   mamba env create -f envs/wvdb_rnavirhost.yml
+#   conda activate rnavirhost
+#   rnavirhost --help   # confirm installation
+#
+# To activate: conda activate rnavirhost
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  - python>=3
+  - bioconda::rnavirhost=1.0.5       # pin to tested version
+  - bioconda::prodigal>=2.6.3        # protein prediction (rnavirhost dependency)
+  - bioconda::blast>=2.12.0          # BLASTn fallback for non-coding seqs
+  - conda-forge::pandas=2.0.3        # pin — rnavirhost breaks on pandas 2.1+
+  - conda-forge::numpy>=1.23.5
+  - conda-forge::scikit-learn=1.1.3  # pin — model serialization version-sensitive
+  - conda-forge::xgboost=1.7.4       # pin — model serialization version-sensitive
+  - conda-forge::biopython>=1.83

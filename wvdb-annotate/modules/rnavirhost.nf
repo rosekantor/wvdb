@@ -1,11 +1,21 @@
 /*
  * modules/rnavirhost.nf
  * RNAVIRHOST — host prediction for RNA viruses.
- * Requires CheckV quality_summary.tsv and geNomad virus_summary.tsv
- * to first generate an order.csv input file.
  *
- * run_rnavirhost.py (in bin/) handles both the order.csv generation
- * and the RNAVirHost run. Upload that script to finalize this process.
+ * Builds a consensus viral order classification from RdRPCATCH + geNomad
+ * outputs (RdRPCATCH preferred; geNomad fallback; 'Unclassified' if neither),
+ * then runs `rnavirhost predict`.
+ *
+ * RNAVirHost is available on bioconda:
+ *   conda install -c bioconda rnavirhost
+ * It is included in the main wvdb-annotate conda environment.
+ *
+ * Note: RNAVirHost is designed for RNA viruses. Sequences without protein-
+ * coding genes (detected by Prodigal) fall back to BLASTn-based host
+ * assignment. DNA viruses will mostly receive 'unclassified' evidence.
+ *
+ * The --force flag is passed to run_rnavirhost.py so Nextflow -resume
+ * does not fail if the output directory already exists in the work dir.
  */
 
 process RNAVIRHOST {
@@ -16,26 +26,33 @@ process RNAVIRHOST {
 
     input:
     path input_fasta
-    path checkv_quality       // checkv_out/quality_summary.tsv
-    path genomad_virus_summary  // genomad virus_summary.tsv
+    path checkv_quality           // checkv_out/quality_summary.tsv
+    path genomad_virus_summary    // genomad <prefix>_virus_summary.tsv
+    path rdrpcatch_tsv            // rdrpcatch annotated output TSV
 
     output:
-    path "rnavirhost_out/",         emit: rnavirhost_dir
-    path "rnavirhost_out/*.tsv",    emit: results_tsv, optional: true
+    path "rnavirhost_out/",                             emit: rnavirhost_dir
+    path "rnavirhost_out/predict/result.csv",           emit: result_csv,  optional: true
+    path "rnavirhost_out/result.csv",                   emit: result_csv2, optional: true
+    path "rnavirhost_consensus_orders.csv",             emit: orders_csv
 
     script:
     """
     run_rnavirhost.py \\
-        --fasta          "${input_fasta}" \\
-        --checkv-tsv     "${checkv_quality}" \\
-        --genomad-tsv    "${genomad_virus_summary}" \\
-        --outdir         rnavirhost_out \\
-        --threads        ${task.cpus}
+        --genomad  "${genomad_virus_summary}" \\
+        --checkv   "${checkv_quality}" \\
+        --rdrpcatch "${rdrpcatch_tsv}" \\
+        -f "${input_fasta}" \\
+        -O rnavirhost_consensus_orders.csv \\
+        -o rnavirhost_out \\
+        --force
     """
 
     stub:
     """
-    mkdir -p rnavirhost_out
-    touch rnavirhost_out/rnavirhost_predictions.tsv
+    mkdir -p rnavirhost_out/predict
+    touch rnavirhost_out/predict/result.csv
+    touch rnavirhost_out/result.csv
+    touch rnavirhost_consensus_orders.csv
     """
 }

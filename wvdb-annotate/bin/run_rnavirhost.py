@@ -1,153 +1,217 @@
+#!/usr/bin/env python3
+"""
+run_rnavirhost.py — generate consensus viral order classifications and run RNAVirHost.
+
+Builds the order classification CSV required by RNAVirHost from RdRPCATCH and
+geNomad outputs (RdRPCATCH order preferred; geNomad fallback; 'Unclassified' if
+neither). Runs `rnavirhost predict` and reports the result CSV path.
+
+Usage:
+  run_rnavirhost.py \\
+      -g genomad_out/<prefix>_summary/<prefix>_virus_summary.tsv \\
+      -c checkv_out/quality_summary.tsv \\
+      -r rdrpcatch_out/rdrpcatch_output_annotated.tsv \\
+      -f votus.fasta \\
+      -O orders.csv \\
+      -o rnavirhost_out
+"""
+
 import argparse
-import pandas as pd
-import numpy as np
-from pathlib import Path
+import shutil
 import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Loaders (parallel to merge_annotations.py — kept lightweight here)
+# ---------------------------------------------------------------------------
 
 def load_checkv(checkv):
-    checkv_df = pd.read_csv(checkv, sep='\t')
-    checkv_df = checkv_df.rename(columns={'contig_id': 'contig'})
-    return checkv_df
+    df = pd.read_csv(checkv, sep='\t')
+    df = df.rename(columns={'contig_id': 'contig'})
+    return df
 
 
 def load_genomad(genomad):
-    genomad_tax_df = pd.read_csv(genomad, sep='\t')
-    genomad_tax_df = genomad_tax_df.rename(columns={'seq_name': 'contig'})
-    genomad_tax_df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']] = (
-        genomad_tax_df['taxonomy'].str.split(';', expand=True)
+    df = pd.read_csv(genomad, sep='\t')
+    df = df.rename(columns={'seq_name': 'contig'})
+    df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']] = (
+        df['taxonomy'].str.split(';', expand=True)
     )
-    genomad_tax_df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']] = (
-        genomad_tax_df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']].replace('', np.nan)
+    df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']] = (
+        df[['Domain', 'Realm', 'Kingdom', 'Phylum', 'Class', 'Order', 'Family']]
+        .replace('', np.nan)
     )
-    return genomad_tax_df[['contig', 'Order']]
+    return df[['contig', 'Order']]
 
 
 def load_rdrpcatch(rdrpcatch_file):
-    rdrp_df = pd.read_csv(rdrpcatch_file, sep='\t')
-    rdrp_df = rdrp_df.rename(columns={'Contig_name': 'contig'})
-    
-    tax = rdrp_df['MMseqs_Taxonomy_2bLCA'].fillna('').str.replace(' ', '_', regex=False)
-    rdrp_df['Order'] = tax.str.extract(r';o_([^;]+);?', expand=False)
+    df = pd.read_csv(rdrpcatch_file, sep='\t')
+    df = df.rename(columns={'Contig_name': 'contig'})
+    tax = df['MMseqs_Taxonomy_2bLCA'].fillna('').str.replace(' ', '_', regex=False)
+    df['Order'] = tax.str.extract(r';o_([^;]+);?', expand=False)
+    return df[['contig', 'Order']].copy()
 
-    rdrp_tax_df = rdrp_df[['contig', 'Order']].copy()
 
-    return rdrp_tax_df
-
+# ---------------------------------------------------------------------------
+# Consensus order + orders.csv generation
+# ---------------------------------------------------------------------------
 
 def get_consensus_order(rdrpcatch_df, genomad_df, checkv_df, orders_file):
     """
-    Make orders.csv file for RNAVirHost.
+    Build orders.csv for RNAVirHost from RdRPCATCH + geNomad + CheckV contigs.
 
     Priority:
-    1. RdRpCATCH order
-    2. geNomad order
-    3. Unclassified
+      1. RdRPCATCH order
+      2. geNomad order
+      3. 'Unclassified'
+
+    The output CSV format required by rnavirhost predict:
+      (unnamed index col)  y|virus order
+      contig_id_1          Ortervirales
+      ...
     """
     orders_file = Path(orders_file)
     orders_file.parent.mkdir(parents=True, exist_ok=True)
 
-    rdrp_orders = rdrpcatch_df.drop_duplicates('contig').rename(columns={'Order': 'Order_R'})
+    rdrp_orders    = rdrpcatch_df.drop_duplicates('contig').rename(columns={'Order': 'Order_R'})
     genomad_orders = genomad_df.drop_duplicates('contig').rename(columns={'Order': 'Order_G'})
-    # make sure all contigs exist in the dataframe (they all exist in checkv but not all necessarily exist in genomad or rdrpcatch)
     checkv_contigs = checkv_df[['contig']].drop_duplicates('contig')
 
-    orders_df = pd.merge(rdrp_orders, genomad_orders, on='contig', how='outer')
-    orders_df = pd.merge(orders_df, checkv_contigs, on='contig', how='outer')
+    orders_df = pd.merge(rdrp_orders,    genomad_orders, on='contig', how='outer')
+    orders_df = pd.merge(orders_df,      checkv_contigs, on='contig', how='outer')
 
     orders_df['Order_consensus'] = orders_df['Order_R']
-    orders_df.loc[orders_df['Order_consensus'].isna(), 'Order_consensus'] = orders_df['Order_G']
+    orders_df.loc[orders_df['Order_consensus'].isna(), 'Order_consensus'] = \
+        orders_df['Order_G']
     orders_df['Order_consensus'] = orders_df['Order_consensus'].fillna('Unclassified')
+
+    # Write in the format RNAVirHost expects: unnamed first col, 'y|virus order' second col
     out_df = orders_df[['contig', 'Order_consensus']].rename(
         columns={'contig': '', 'Order_consensus': 'y|virus order'}
     )
-
     out_df.to_csv(orders_file, index=False)
+
+    n_classified = (orders_df['Order_consensus'] != 'Unclassified').sum()
+    print(
+        f"[run_rnavirhost] orders file: {len(orders_df)} contigs, "
+        f"{n_classified} classified, "
+        f"{len(orders_df) - n_classified} Unclassified",
+        file=sys.stderr
+    )
 
     return orders_df[['contig', 'Order_R', 'Order_G', 'Order_consensus']]
 
 
-def run_rnavirhost(fasta, orders_file, outdir):
+# ---------------------------------------------------------------------------
+# RNAVirHost runner
+# ---------------------------------------------------------------------------
+
+def run_rnavirhost(fasta, orders_file, outdir, force=False):
     """
-    Run rnavirhost predict and return the expected result CSV plus exit code.
+    Run `rnavirhost predict` and return the result CSV path.
+
+    Parameters
+    ----------
+    fasta : str | Path
+    orders_file : str | Path
+    outdir : str | Path
+    force : bool
+        If True, remove existing outdir before running. Required for
+        Nextflow -resume compatibility since work dirs may be reused.
     """
-    fasta = Path(fasta)
+    fasta       = Path(fasta)
     orders_file = Path(orders_file)
-    outdir = Path(outdir)
+    outdir      = Path(outdir)
 
     if outdir.exists():
-        raise FileExistsError(f"Output directory already exists: {outdir}")
+        if force:
+            print(f"  Removing existing output directory: {outdir}", file=sys.stderr)
+            shutil.rmtree(outdir)
+        else:
+            raise FileExistsError(
+                f"Output directory already exists: {outdir}\n"
+                f"Use --force to overwrite."
+            )
 
     cmd = [
-        "rnavirhost",
-        "predict",
-        "-i", str(fasta),
-        "--taxa", str(orders_file),
-        "-o", str(outdir),
+        "rnavirhost", "predict",
+        "-i",      str(fasta),
+        "--taxa",  str(orders_file),
+        "-o",      str(outdir),
     ]
+    print(f"[run_rnavirhost] running: {' '.join(cmd)}", file=sys.stderr)
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
-    csv_path = outdir / "predict" / "result.csv"
+    if result.stdout:
+        print(result.stdout, file=sys.stderr)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"rnavirhost failed with exit code {result.returncode}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
+            f"rnavirhost predict failed (exit {result.returncode})"
         )
 
+    # Try both output path conventions across rnavirhost versions
+    csv_path = outdir / "predict" / "result.csv"
     if not csv_path.exists():
-        raise FileNotFoundError(f"Expected output was not found: {csv_path}")
+        csv_path = outdir / "result.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"Expected RNAVirHost output not found: {csv_path}\n"
+            f"Check rnavirhost stdout/stderr above."
+        )
 
-    return csv_path, result.returncode
+    print(f"[run_rnavirhost] result: {csv_path}", file=sys.stderr)
+    return csv_path
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(
-    description=(
-    "Use RNAVirHost with custom Order-level classifications." \
-    "Get consensus orders from geNomad and RdRpCATCH, feed to RNAVirHost, run RNAVirHost.")
+        description=(
+            "Generate consensus viral order classifications from geNomad and "
+            "RdRPCATCH, then run RNAVirHost host prediction."
+        )
     )
-    parser.add_argument(
-        '-g', '--genomad_virus_summary', required=True, type=str,
-        help='geNomad virus_summary.tsv'
-    )
-    parser.add_argument(
-        '-c', '--checkv_tsv', required=True, type=str,
-        help='CheckV quality_summary.tsv'
-    )
-    parser.add_argument(
-        '-r', '--rdrpcatch_file', required=True, type=str,
-        help='RdRpCATCH taxonomy tsv'
-    )
-    parser.add_argument(
-        '-f', '--fasta', required=True, type=str,
-        help='fasta file of viral genomes'
-    )
-    parser.add_argument(
-        '-O', '--orders_file', required=True, type=str,
-        help='Output consensus order file'
-    )
-    parser.add_argument(
-        '-o', '--rnavirhost_outdir', required=True, type=str,
-        help='Output directory for RNAVirHost'
-    )
+    parser.add_argument('-g', '--genomad', required=True,
+                        help='geNomad <prefix>_virus_summary.tsv (same as --genomad in merge_annotations.py)')
+    parser.add_argument('-c', '--checkv', required=True,
+                        help='CheckV quality_summary.tsv (same as --checkv in merge_annotations.py)')
+    parser.add_argument('-r', '--rdrpcatch', required=True,
+                        help='RdRPCATCH annotated output TSV (same as --rdrpcatch in merge_annotations.py)')
+    parser.add_argument('-f', '--fasta', required=True,
+                        help='Input vOTU FASTA')
+    parser.add_argument('-O', '--orders-file', required=True,
+                        help='Output consensus orders CSV for RNAVirHost')
+    parser.add_argument('-o', '--rnavirhost-outdir', required=True,
+                        help='Output directory for RNAVirHost')
+    parser.add_argument('--force', action='store_true',
+                        help='Overwrite existing rnavirhost output directory')
 
     args = parser.parse_args()
 
-    checkv_df = load_checkv(args.checkv_tsv)
-    genomad_tax_df = load_genomad(args.genomad_summary)
-    rdrp_tax_df = load_rdrpcatch(args.rdrpcatch_file)
+    checkv_df  = load_checkv(args.checkv)
+    genomad_df = load_genomad(args.genomad)
+    rdrp_df    = load_rdrpcatch(args.rdrpcatch)
 
-    # combine files
-    get_consensus_order(rdrp_tax_df, genomad_tax_df, checkv_df, args.orders_file)
-    rnavirhost_csv, exitcode = run_rnavirhost(args.fasta, args.orders_file, args.rnavirhost_outdir)
+    get_consensus_order(rdrp_df, genomad_df, checkv_df, args.orders_file)
 
-    rnavirhost_csv = Path(args.rnavirhost_outdir) / "predict" / "result.csv"
-    if rnavirhost_csv.exists() and rnavirhost_csv.stat().st_size > 0:
-        print(rnavirhost_csv)
-    else:
-        rnavirhost_csv, _ = run_rnavirhost(args.fasta, args.orders_file, args.rnavirhost_outdir)
+    run_rnavirhost(
+        fasta       = args.fasta,
+        orders_file = args.orders_file,
+        outdir      = args.rnavirhost_outdir,
+        force       = args.force,
+    )
 
 
 if __name__ == '__main__':

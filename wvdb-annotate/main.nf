@@ -16,9 +16,11 @@
  *   8. GUESS_HOST      — ensemble LLM host prediction (optional, default: false)
  *   9. ANNOTATION_SUMMARY — per-step counts report
  *
- * BLASTn databases are specified via a CSV file (--blastn_dbs):
- *   name,path
- *   IMGVR,/path/to/IMGVR5_UViG.fna
+ * Databases are specified via a unified CSV file (--databases):
+ *   type,name,path
+ *   blastn,IMGVR,/path/to/IMGVR5_UViG.fna
+ *   diamond,nr,/path/to/nr.dmnd
+ *   hmm,pfam,/path/to/Pfam-A.hmm
  *   CHVD,/path/to/CHVD_virus_sequences.fasta
  *
  * Usage:
@@ -27,7 +29,7 @@
  *       --outdir        /path/to/results \
  *       --checkvdb      /path/to/checkv-db-v1.5 \
  *       --genomad_db    /path/to/genomad_db \
- *       --blastn_dbs    /path/to/blastn_dbs.csv
+ *       --databases     /path/to/databases.csv
  */
 
 nextflow.enable.dsl = 2
@@ -41,7 +43,8 @@ include { DIAMOND            } from './modules/diamond'
 include { RNAVIRHOST         } from './modules/rnavirhost'
 include { PREPARE_ICTV       } from './modules/summary'
 include { MERGE_ANNOTATIONS  } from './modules/summary'
-include { GUESS_HOST         } from './modules/summary'
+include { GUESS_HOST             } from './modules/summary'
+include { CHARACTERIZE_PROTEINS  } from './subworkflows/characterize_proteins'
 include { ANNOTATION_SUMMARY } from './modules/summary'
 
 workflow {
@@ -78,12 +81,13 @@ workflow {
     def run_rdrpcatch  = params.run_rdrpcatch  instanceof Boolean ? params.run_rdrpcatch  : params.run_rdrpcatch.toString()  != 'false'
     def run_blastn     = params.run_blastn     instanceof Boolean ? params.run_blastn     : params.run_blastn.toString()     != 'false'
     def run_diamond    = params.run_diamond    instanceof Boolean ? params.run_diamond    : params.run_diamond.toString()    != 'false'
+    def run_hmmsearch  = params.run_hmmsearch  instanceof Boolean ? (params.run_hmmsearch  ?: false) : params.run_hmmsearch.toString()  != 'false'
     def run_rnavirhost = params.run_rnavirhost instanceof Boolean ? params.run_rnavirhost : params.run_rnavirhost.toString() != 'false'
     def run_guess_host = params.run_guess_host instanceof Boolean ? params.run_guess_host : params.run_guess_host.toString() != 'false'
 
     if (run_rdrpcatch  && !params.rdrpcatch_db)  errors << "  --rdrpcatch_db is required when --run_rdrpcatch=true"
-    if (run_blastn     && !params.blastn_dbs)    errors << "  --blastn_dbs is required when --run_blastn=true"
-    if (run_diamond    && !params.diamond_db)    errors << "  --diamond_db is required when --run_diamond=true"
+    if ((run_blastn || run_diamond || run_hmmsearch) && !params.databases)
+        errors << "  --databases CSV is required when run_blastn, run_diamond, or run_hmmsearch is true"
     if (errors) {
         log.error "Parameter errors:\n" + errors.join("\n")
         System.exit(1)
@@ -96,10 +100,9 @@ workflow {
         }
         if (run_rdrpcatch && !file(params.rdrpcatch_db).exists())
             error "rdrpcatch_db not found: ${params.rdrpcatch_db}"
-        if (run_blastn && !file(params.blastn_dbs).exists())
-            error "blastn_dbs CSV not found: ${params.blastn_dbs}"
-        if (run_diamond && !file(params.diamond_db).exists())
-            error "diamond_db not found: ${params.diamond_db}"
+        if ((run_blastn || run_diamond || run_hmmsearch)
+                && params.databases && !file(params.databases).exists())
+            error "databases CSV not found: ${params.databases}"
     }
 
     log.info """
@@ -111,6 +114,7 @@ workflow {
      run_rdrpcatch      : ${params.run_rdrpcatch}
      run_blastn         : ${params.run_blastn}
      run_diamond        : ${params.run_diamond}
+     run_hmmsearch      : ${params.run_hmmsearch}
      run_rnavirhost     : ${params.run_rnavirhost}
      run_guess_host     : ${params.run_guess_host}
     ============================================
@@ -120,7 +124,7 @@ workflow {
     input_fasta    = file(params.input_fasta, checkIfExists: check)
     checkvdb       = file(params.checkvdb,    checkIfExists: check)
     genomad_db     = file(params.genomad_db,  checkIfExists: check)
-    diamond_db     = params.diamond_db ?: ''  // val — not staged
+    // diamond_dbs and hmm_profiles read as CSV via splitCsv in CHARACTERIZE_PROTEINS
 
     // -----------------------------------------------------------------------
     // Step 1 — CheckV
@@ -139,7 +143,20 @@ workflow {
     )
 
     // -----------------------------------------------------------------------
-    // Step 3 — RdRPCATCH (optional)
+    // Step 3 — Protein characterization (optional)
+    // diamond and hmm rows from unified databases CSV
+    // -----------------------------------------------------------------------
+    if ( run_diamond || run_hmmsearch ) {
+        CHARACTERIZE_PROTEINS(
+            GENOMAD.out.proteins_faa
+        )
+        protein_summary_tsv = CHARACTERIZE_PROTEINS.out.protein_summary_tsv
+    } else {
+        protein_summary_tsv = Channel.of(file('NO_FILE_PROTEIN_SUMMARY'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4 — RdRPCATCH (optional)
     // -----------------------------------------------------------------------
     if ( run_rdrpcatch ) {
         rdrpcatch_db = file(params.rdrpcatch_db, checkIfExists: check)
@@ -157,11 +174,12 @@ workflow {
     // blastn_dbs CSV format: name,path  (one database per row, header required)
     // -----------------------------------------------------------------------
     if ( run_blastn ) {
-        // Parse CSV → channel of [db_name, db_path] per row
-        // BLAST db paths kept as strings (val) to avoid staging index file issues
+        // Filter unified databases CSV to blastn rows
+        // db paths kept as strings (val) to avoid staging index file issues
         blastn_dbs_ch = Channel
-            .fromPath(params.blastn_dbs)
+            .fromPath(params.databases)
             .splitCsv(header: true)
+            .filter { row -> row.type == "blastn" }
             .map { row -> tuple(row.name, row.path) }
 
         BLASTN(
@@ -183,31 +201,29 @@ workflow {
         blastn_ani_tsvs = Channel.of(file('NO_FILE_BLASTN'))
     }
 
-    // -----------------------------------------------------------------------
-    // Step 5 — DIAMOND protein search (optional)
-    // Uses predicted proteins from geNomad
-    // -----------------------------------------------------------------------
-    if ( run_diamond ) {
-        DIAMOND(
-            GENOMAD.out.proteins_faa,
-            diamond_db
-        )
-        diamond_tsv = DIAMOND.out.diamond_tsv
-    } else {
-        diamond_tsv = Channel.of(file('NO_FILE_DIAMOND'))
-    }
+    // DIAMOND is now handled in CHARACTERIZE_PROTEINS subworkflow (Step 3)
+    diamond_tsv = Channel.of(file('NO_FILE_DIAMOND'))
 
     // -----------------------------------------------------------------------
     // Step 6 — RNAVirHost host prediction (optional)
     // Sequential: requires CheckV + geNomad output
     // -----------------------------------------------------------------------
     if ( run_rnavirhost ) {
-        RNAVIRHOST(
-            input_fasta,
-            CHECKV.out.quality_summary,
-            GENOMAD.out.virus_summary
-        )
-        rnavirhost_tsv = RNAVIRHOST.out.results_tsv.flatten().first()
+        if ( !run_rdrpcatch ) {
+            log.warn "run_rnavirhost=true requires run_rdrpcatch=true — skipping RNAVirHost"
+            rnavirhost_tsv = Channel.of(file('NO_FILE_RNAVIRHOST'))
+        } else {
+            RNAVIRHOST(
+                input_fasta,
+                CHECKV.out.quality_summary,
+                GENOMAD.out.virus_summary,
+                RDRPCATCH.out.results_tsv.flatten().first()
+            )
+            // Handle both output path conventions across rnavirhost versions
+            rnavirhost_tsv = RNAVIRHOST.out.result_csv
+                .mix(RNAVIRHOST.out.result_csv2)
+                .first()
+        }
     } else {
         rnavirhost_tsv = Channel.of(file('NO_FILE_RNAVIRHOST'))
     }
