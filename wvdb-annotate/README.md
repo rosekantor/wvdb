@@ -22,15 +22,16 @@ flowchart TD
     A --> D["RdRPCATCH\nRdRP detection\n(run_rdrpcatch=true)"]
     A --> E["BLASTn × N databases\nnucleotide similarity\n(run_blastn=true)"]
     E --> F["BLASTani\npairwise ANI"]
-    C -->|proteins.faa| G["DIAMOND\nprotein vs NCBI-nr\n(run_diamond=false)"]
+    C -->|proteins.faa| P["CHARACTERIZE_PROTEINS\nDIAMOND × N + hmmsearch × N\n(run_diamond / run_hmmsearch)"]
     B --> H["RNAVirHost\nhost prediction\n(run_rnavirhost=true)"]
     C --> H
+    D --> H
 
     B --> I["MERGE_ANNOTATIONS\nper-vOTU annotation table"]
     C --> I
     D --> I
     F --> I
-    G --> I
+    P --> I
     H --> I
 
     I --> J["GUESS_HOST\nensemble host prediction\n(run_guess_host=false)"]
@@ -42,8 +43,8 @@ flowchart TD
 ```
 
 All steps except RNAVirHost run in parallel from the input FASTA.
-RNAVirHost runs sequentially after CheckV and geNomad complete,
-as it requires their outputs to generate its input order file.
+RNAVirHost runs sequentially after CheckV, geNomad, and RdRPCATCH complete,
+as it requires their outputs to generate its consensus order classification.
 
 ### Step control
 
@@ -54,6 +55,7 @@ as it requires their outputs to generate its input order file.
 | RdRPCATCH | on | `--run_rdrpcatch false` |
 | BLASTn | on | `--run_blastn false` |
 | DIAMOND | off | `--run_diamond true` |
+| hmmsearch | off | `--run_hmmsearch true` |
 | RNAVirHost | on | `--run_rnavirhost false` |
 | GUESS_HOST | off | `--run_guess_host true` |
 
@@ -63,65 +65,84 @@ as it requires their outputs to generate its input order file.
 
 ```
 wvdb-annotate/
-├── main.nf                     # Entry point; wires all annotation steps
-├── nextflow.config             # Params, profiles (local, slurm, slurm_nomem, cluster, conda, test)
+├── main.nf                         # Entry point; wires all annotation steps
+├── nextflow.config                 # Params, profiles (local, slurm, slurm_nomem, cluster, conda, test)
 ├── conf/
-│   └── base.config             # Per-process CPU/memory resource labels
+│   └── base.config                 # Per-process CPU/memory resource labels
 ├── modules/
-│   ├── checkv.nf               # CheckV quality assessment
-│   ├── genomad.nf              # geNomad classification + gene prediction
-│   ├── rdrpcatch.nf            # RdRPCATCH RdRP detection
-│   ├── blastn_tools.nf         # BLASTN + BLASTANI (one process per database, parallel)
-│   ├── diamond.nf              # DIAMOND protein search (scaffolded)
-│   ├── rnavirhost.nf           # RNAVirHost host prediction
-│   └── summary.nf              # MERGE_ANNOTATIONS, GUESS_HOST, ANNOTATION_SUMMARY
-├── bin/                        # Python scripts (auto-added to PATH by Nextflow)
-│   ├── blastani_nayfach.py     # Compute pairwise ANI from blastn tabular output
-│   ├── merge_annotations.py    # Combine all annotation outputs per vOTU
-│   ├── guess_host.py           # Ensemble host prediction (optional LLM)
-│   ├── run_rnavirhost.py       # RNAVirHost wrapper + order.csv generation
-│   └── annotation_summary.py  # Per-step annotation counts → TSV + markdown report
+│   ├── checkv.nf                   # CheckV quality assessment
+│   ├── genomad.nf                  # geNomad classification + gene prediction
+│   ├── rdrpcatch.nf                # RdRPCATCH RdRP detection (separate conda env)
+│   ├── blastn_tools.nf             # BLASTN + BLASTANI (one process per database, parallel)
+│   ├── protein_tools.nf            # DIAMOND, HMMSEARCH, PROTEIN_SUMMARY
+│   ├── rnavirhost.nf               # RNAVirHost host prediction (separate conda env)
+│   └── summary.nf                  # MERGE_ANNOTATIONS, PREPARE_ICTV, GUESS_HOST,
+│                                   #   ANNOTATION_SUMMARY
+├── subworkflows/
+│   └── characterize_proteins.nf   # DIAMOND × N + hmmsearch × N in parallel
+├── bin/                            # Python scripts (auto-added to PATH by Nextflow)
+│   ├── blastani_nayfach.py         # Compute pairwise ANI from blastn tabular output
+│   ├── merge_annotations.py        # Combine all annotation outputs per vOTU
+│   ├── run_rnavirhost.py           # RNAVirHost wrapper + consensus order generation
+│   ├── guess_host.py               # Ensemble host prediction (optional LLM)
+│   ├── prepare_ictv.py             # Process ICTV family HTML → ictv_families.tsv
+│   ├── parse_hmmsearch.py          # Parse hmmsearch --domtblout to clean TSV
+│   └── summarize_protein_hits.py   # Per-contig protein hit counts
 ├── envs/
-│   └── wvdb_annotate.yml       # Conda environment for all tools
+│   ├── wvdb_annotate.yml           # Main conda environment
+│   ├── wvdb_rdrpcatch.yml          # Separate env for RdRPCATCH (Python 3.12)
+│   └── wvdb_rnavirhost.yml         # Separate env for RNAVirHost (pinned ML deps)
+├── ref_data/
+│   └── ictv_families.tsv           # Bundled ICTV family table (MSL Jan 2026)
 └── test/
     └── data/
-        └── test_votus.fasta    # Small test input
+        └── test_votus.fasta        # Small test input
 ```
 
 ---
 
 ## Dependencies
 
-All tools except RdRPCATCH are managed via `envs/wvdb_annotate.yml`.
+Three conda environments are required due to conflicting Python version and
+dependency constraints between tools.
+
+### Main environment (`wvdb-annotate`)
 
 | Tool | Version | Notes |
 |---|---|---|
 | Nextflow | ≥ 23.10 | Requires Java 11+ |
 | checkv | ≥ 1.0.3 | |
-| genomad | ≥ 1.8.0 | Requires separate database download (see below) |
+| genomad | ≥ 1.8.0 | Requires separate database download |
 | blastn | 2.16.0+ | Via `blast` conda package |
-| diamond | ≥ 2.0.9 | Protein search; scaffolded (run_diamond=false by default) |
-| Python | 3.11 | biopython (SeqIO, Entrez), pandas, numpy, requests |
-| rdrpcatch | latest | Separate `rdrpcatch` conda env required (Python 3.12) |
+| diamond | ≥ 2.0.9 | Protein search |
+| hmmer | ≥ 3.3.2 | hmmsearch for HMM profile searches |
+| Python | 3.11 | biopython (SeqIO, Entrez), pandas, numpy, requests, lxml |
+
+### RdRPCATCH environment (`rdrpcatch`)
+
+Separate environment required — RdRPCATCH needs Python 3.12.
+
+### RNAVirHost environment (`rnavirhost`)
+
+Separate environment required — RNAVirHost requires pinned versions of
+pandas (2.0.3), scikit-learn (1.1.3), and xgboost (1.7.4) that conflict
+with other tools.
 
 ---
 
 ## Installation
 
-### 1. Create the conda environment
+### 1. Create the main conda environment
 
 ```bash
 mamba env create -f envs/wvdb_annotate.yml
-# If mamba fails to solve:
-# conda env create -f envs/wvdb_annotate.yml
-
+# If mamba fails: conda env create -f envs/wvdb_annotate.yml
 conda activate wvdb-annotate
 ```
 
 ### 2. Create the RdRPCATCH environment
 
-RdRPCATCH requires Python 3.12 and cannot share the `wvdb-annotate`
-environment (Python 3.11). Create a dedicated environment:
+RdRPCATCH requires Python 3.12 and cannot share the main environment.
 
 ```bash
 # Option A — install from bioconda directly (recommended)
@@ -131,48 +152,64 @@ conda create -n rdrpcatch -c bioconda rdrpcatch
 mamba env create -f envs/wvdb_rdrpcatch.yml
 ```
 
-Then download the RdRPCATCH databases:
+Download the RdRPCATCH databases:
 
 ```bash
 conda activate rdrpcatch
 rdrpcatch databases --destination-dir /path/to/rdrp_catch_db
 ```
 
-The pipeline automatically uses the `rdrpcatch` conda environment for the
+The pipeline activates the `rdrpcatch` environment automatically for the
 `RDRPCATCH` process via a per-process `conda` directive in `nextflow.config`.
-If your rdrpcatch environment is installed at a non-standard prefix, override
-the path:
+Override the path if installed at a non-standard prefix:
 
 ```bash
 nextflow run main.nf --rdrpcatch_conda_env /path/to/conda/envs/rdrpcatch ...
 ```
 
-### 3. Download the geNomad database
+### 3. Create the RNAVirHost environment
 
-The geNomad database must be downloaded separately after installing genomad.
-The recommended method uses the built-in download command:
+RNAVirHost requires pinned ML dependency versions that conflict with the
+main environment.
+
+```bash
+mamba env create -f envs/wvdb_rnavirhost.yml
+conda activate rnavirhost
+rnavirhost --help   # confirm installation
+```
+
+The pipeline activates this environment automatically for the `RNAVIRHOST`
+process. Override the path if needed:
+
+```bash
+nextflow run main.nf --rnavirhost_conda_env /path/to/conda/envs/rnavirhost ...
+```
+
+### 4. Download the geNomad database
 
 ```bash
 conda activate wvdb-annotate
 genomad download-database /path/to/genomad_db/
 ```
 
-This downloads and decompresses the database (~3.5 GB) into the specified
-directory. Alternatively, download manually from Zenodo following the
-instructions at: https://github.com/apcamargo/genomad
+Alternatively, download manually from Zenodo:
+https://github.com/apcamargo/genomad
 
-Pass the database directory to the pipeline via `--genomad_db /path/to/genomad_db`.
-
-### 4. Download the CheckV database
+### 5. Download the CheckV database
 
 ```bash
 checkv download_database /path/to/checkv-db/
 ```
 
-### 5. Build BLAST databases
+### 6. Prepare the ICTV family reference file
 
-For each FASTA in your BLASTn database list, build the BLAST index if not
-already done:
+A processed copy is bundled in `ref_data/ictv_families.tsv` (MSL January 2026)
+and used by default — no setup required for most users. To update, see
+[Updating reference data](#updating-reference-data).
+
+### 7. Build BLAST databases
+
+For each FASTA in your databases CSV, build the BLAST index if not already done:
 
 ```bash
 makeblastdb -in /path/to/db.fna -dbtype nucl -out /path/to/db.fna
@@ -180,37 +217,45 @@ makeblastdb -in /path/to/db.fna -dbtype nucl -out /path/to/db.fna
 
 All index files must reside in the same directory as the `.fna` file.
 
-### 6. Validate the pipeline DAG
+### 8. Validate the pipeline DAG
 
 ```bash
 cd wvdb-annotate
-nextflow run main.nf -stub -profile local
+nextflow run main.nf -stub -profile local \
+    --run_blastn false
 ```
 
 ---
 
-## BLASTn database configuration
+## Database configuration
 
-BLASTn searches run in parallel against all databases listed in a
-two-column CSV file:
+All annotation databases (BLASTn, DIAMOND, hmmsearch profiles) are specified
+in a single unified CSV file:
 
 ```csv
-name,path
-IMGVR,/p/vast1/mlbiomon/ref_data/IMG-VR_2025-12-02/IMGVR5_UViG.fna
-CHVD,/p/vast1/mlbiomon/ref_data/CHVD_tisza2021/CHVD_virus_sequences_v1.1.fasta
-UHGV,/p/vast1/mlbiomon/ref_data/UHGV_nayfach2025/nayfach2025_votus_hq_plus.fna
-VIRE,/p/vast1/mlbiomon/ref_data/VIRE/all_vire.fna
-core_nt,/p/vast1/kpath/blastdb/core_nt/core_nt_Jul25_filt
+type,name,path
+blastn,IMGVR,/p/vast1/mlbiomon/ref_data/IMG-VR_2025-12-02/IMGVR5_UViG.fna
+blastn,CHVD,/p/vast1/mlbiomon/ref_data/CHVD_tisza2021/CHVD_virus_sequences_v1.1.fasta
+blastn,UHGV,/p/vast1/mlbiomon/ref_data/UHGV_nayfach2025/nayfach2025_votus_hq_plus.fna
+blastn,VIRE,/p/vast1/mlbiomon/ref_data/VIRE/all_vire.fna
+blastn,core_nt,/p/vast1/kpath/blastdb/core_nt/core_nt_Jul25_filt
+diamond,nr,/p/vast1/mlbiomon/ref_data/nr.dmnd
+hmm,pfam,/p/vast1/mlbiomon/ref_data/Pfam-A.hmm
 ```
 
-- `name` — short label used for output filenames and report columns
-- `path` — full path to the BLAST database (`.fna` file or db prefix)
-- Header row (`name,path`) is required
+- `type` — `blastn`, `diamond`, or `hmm`
+- `name` — short label used for output filenames and merged annotation columns
+- `path` — full path to the database file
 
-Pass this file via `--blastn_dbs /path/to/blastn_dbs.csv`. One `BLASTN`
-and `BLASTANI` process pair runs per row, all in parallel. To add a new
-database, add a row to the CSV and rerun with `-resume` — only the new
-database will be searched.
+Pass this file via `--databases /path/to/databases.csv`. Rows are only
+processed when their type's corresponding flag is true (`run_blastn`,
+`run_diamond`, `run_hmmsearch`). A row present in the CSV but with its
+type's flag set to false is silently skipped. To add a new database,
+add a row and rerun with `-resume` — only the new database will be searched.
+
+**`core_nt` is special:** BLASTn hits against the database named `core_nt`
+trigger an Entrez lookup for host organism and isolation source metadata.
+Requires `--entrez_email` to be set.
 
 ---
 
@@ -228,11 +273,12 @@ nextflow run main.nf -profile cluster,conda \
     --checkvdb      /path/to/checkv-db-v1.5 \
     --genomad_db    /path/to/genomad_db \
     --rdrpcatch_db  /path/to/rdrp_catch_db \
-    --blastn_dbs    /path/to/blastn_dbs.csv \
+    --databases     /path/to/databases.csv \
+    --entrez_email  user@institution.edu \
     -resume
 ```
 
-### With DIAMOND protein search enabled
+### With protein characterization enabled
 
 ```bash
 nextflow run main.nf -profile cluster,conda \
@@ -240,16 +286,16 @@ nextflow run main.nf -profile cluster,conda \
     --outdir        /path/to/results \
     --checkvdb      /path/to/checkv-db-v1.5 \
     --genomad_db    /path/to/genomad_db \
-    --blastn_dbs    /path/to/blastn_dbs.csv \
+    --databases     /path/to/databases.csv \
+    --entrez_email  user@institution.edu \
     --run_diamond   true \
-    --diamond_db    /path/to/nr.dmnd \
+    --run_hmmsearch true \
     -resume
 ```
 
-### Skipping optional steps
+### Minimal run (CheckV + geNomad only)
 
 ```bash
-# Run only CheckV + geNomad (no additional databases required)
 nextflow run main.nf -profile cluster,conda \
     --input_fasta      /path/to/votus.fasta \
     --outdir           /path/to/results \
@@ -272,22 +318,28 @@ nextflow run main.nf -profile cluster,conda \
 | `--checkvdb` | required | CheckV database directory |
 | `--genomad_db` | required | geNomad database directory |
 | `--rdrpcatch_db` | null | RdRPCATCH database directory (required if `run_rdrpcatch=true`) |
-| `--blastn_dbs` | null | Path to BLASTn database CSV (required if `run_blastn=true`) |
-| `--diamond_db` | null | DIAMOND protein database `.dmnd` (required if `run_diamond=true`) |
+| `--databases` | null | Unified databases CSV (required if any of `run_blastn`, `run_diamond`, `run_hmmsearch` is true) |
+| `--ictv_fam` | bundled | Path to processed ICTV families TSV |
+| `--entrez_email` | null | Email for NCBI Entrez (required for `core_nt` host lookup) |
 | `--run_rdrpcatch` | true | Scan for RNA-dependent RNA polymerase |
-| `--run_blastn` | true | BLASTn against all databases in `blastn_dbs` CSV |
-| `--run_diamond` | false | DIAMOND protein search (scaffolded, pending script) |
-| `--run_rnavirhost` | true | Host prediction (requires CheckV + geNomad output) |
-| `--run_guess_host` | false | Ensemble LLM host prediction (pending script) |
-| `--rdrpcatch_bin` | `rdrpcatch` | Path to rdrpcatch binary if not in PATH |
+| `--run_blastn` | true | BLASTn against `blastn` rows in databases CSV |
+| `--run_diamond` | false | DIAMOND protein search against `diamond` rows in databases CSV |
+| `--run_hmmsearch` | false | hmmsearch against `hmm` rows in databases CSV |
+| `--run_rnavirhost` | true | Host prediction (requires CheckV + geNomad + RdRPCATCH) |
+| `--run_guess_host` | false | Ensemble LLM host prediction |
 | `--blastn_evalue` | `1e-3` | BLASTn e-value threshold |
 | `--blastn_max_targets` | 10 | BLASTn max target sequences per query |
-| `--blastn_pident` | 90 | BLASTn minimum percent identity |
+| `--diamond_evalue` | `1e-5` | DIAMOND e-value threshold |
+| `--diamond_min_bitscore` | 50 | DIAMOND minimum bitscore |
+| `--diamond_max_targets` | 10 | DIAMOND max target sequences per query |
+| `--diamond_taxonmap` | false | Include staxids in DIAMOND output (requires `--taxonmap` at db build) |
+| `--hmm_evalue` | `1e-5` | hmmsearch e-value fallback when `--cut_tc` is unavailable |
 | `--threads` | 100 | Thread count for high-CPU processes |
 | `--max_memory` | `'64 GB'` | Memory cap for high/medium-CPU processes |
 | `--max_memory_low` | `'16 GB'` | Memory cap for low-CPU processes |
 | `--max_time` | `'24 h'` | Maximum runtime for any process |
-| `--conda_env` | auto | Conda env yml path or prefix |
+| `--rdrpcatch_conda_env` | auto | Path to rdrpcatch conda env (default: `envs/wvdb_rdrpcatch.yml`) |
+| `--rnavirhost_conda_env` | auto | Path to rnavirhost conda env (default: `envs/wvdb_rnavirhost.yml`) |
 
 ---
 
@@ -303,29 +355,32 @@ outdir/
 ├── genomad/
 │   └── genomad_out/
 │       ├── <name>_summary/<name>_virus_summary.tsv
-│       ├── <name>_find_proviruses/<name>_provirus.fna
 │       └── <name>_annotate/<name>_proteins.faa
-├── rdrpcatch/                  # only if run_rdrpcatch=true
+├── rdrpcatch/                      # only if run_rdrpcatch=true
 │   └── rdrpcatch_out/
-│       └── rdrpcatch_results.tsv
-├── blastn/                     # only if run_blastn=true
+├── blastn/                         # only if run_blastn=true
 │   ├── IMGVR/
 │   │   ├── IMGVR.blastn.tsv
 │   │   └── IMGVR.blastn.ani.tsv
-│   ├── CHVD/
-│   │   ├── CHVD.blastn.tsv
-│   │   └── CHVD.blastn.ani.tsv
-│   └── ...                     # one subdirectory per row in blastn_dbs.csv
-├── diamond/                    # only if run_diamond=true
-│   └── diamond_out.tsv
-├── rnavirhost/                 # only if run_rnavirhost=true
-│   └── rnavirhost_out/
-│       └── rnavirhost_predictions.tsv
+│   └── ...                         # one subdirectory per blastn row in databases.csv
+├── proteins/                       # only if run_diamond or run_hmmsearch=true
+│   ├── diamond/
+│   │   └── <name>/
+│   │       └── <name>.diamond.tsv
+│   ├── hmmsearch/
+│   │   └── <name>/
+│   │       ├── <name>.hmmsearch.tsv
+│   │       └── <name>.hmmsearch.domtbl
+│   └── protein_summary.tsv         # per-contig protein hit counts
+├── rnavirhost/                     # only if run_rnavirhost=true
+│   ├── rnavirhost_out/
+│   │   └── result.csv
+│   └── rnavirhost_consensus_orders.csv
 ├── annotations/
-│   ├── merged_annotations.tsv  # per-vOTU annotation table (all tools)
-│   └── host_predictions.tsv    # only if run_guess_host=true
-├── annotation_summary.tsv      # per-step annotation counts (machine-readable)
-└── annotation_summary.md       # annotation counts report (human-readable)
+│   ├── merged_annotations.tsv      # per-vOTU annotation table (all tools)
+│   └── host_predictions.tsv        # only if run_guess_host=true
+├── annotation_summary.tsv          # per-step annotation counts (machine-readable)
+└── annotation_summary.md           # annotation counts report (human-readable)
 ```
 
 ---
@@ -334,10 +389,7 @@ outdir/
 
 ### ICTV family table
 
-A processed copy of the ICTV Virus Properties By Family table is bundled
-in `ref_data/ictv_families.tsv` (MSL accessed January 2026). The pipeline
-uses this file by default — no setup required for most users.
-
+A processed copy is bundled in `ref_data/ictv_families.tsv` (MSL January 2026).
 To update when a new ICTV release is available:
 
 **Step 1 — Save the HTML page manually:**
@@ -354,14 +406,12 @@ git add ref_data/ictv_families.tsv
 git commit -m "ref: update ICTV family table to MSL <version>"
 ```
 
-> **Note on new host mappings:** ICTV occasionally adds new host combination
-> strings (e.g. `"fungi, plants, vertebrates"`) that are not yet in the
-> mapping table in `bin/prepare_ictv.py`. When this happens, `prepare_ictv.py`
-> will print a warning listing the unmapped values and their
-> `host_ICTV_simple` will be null in the output. To fix, add the new
-> combination to the `HOST_REASSIGN` list in `bin/prepare_ictv.py` and rerun.
-> The categories used are: `archaea`, `bacteria`, `fungi`, `invertebrates`,
-> `plants`, `protists`, `vertebrates`, `non-vertebrates`, `incl-vertebrates`.
+> **Note on new host mappings:** If ICTV adds new host combination strings
+> not in the mapping table, `prepare_ictv.py` will warn about unmapped values
+> and their `host_ICTV_simple` will be null. Add the new combination to the
+> `HOST_REASSIGN` list in `bin/prepare_ictv.py` and rerun.
+> Valid categories: `archaea`, `bacteria`, `fungi`, `invertebrates`, `plants`,
+> `protists`, `vertebrates`, `non-vertebrates`, `incl-vertebrates`.
 
 ---
 
@@ -376,6 +426,18 @@ cd /path/to/repo/wvdb-annotate
 nextflow run main.nf ...
 ```
 
+### Three conda environments
+
+| Environment | Python | Key constraint | Tools |
+|---|---|---|---|
+| `wvdb-annotate` | 3.11 | main env | checkv, genomad, blast, diamond, hmmer, all bin/ scripts |
+| `rdrpcatch` | 3.12 | Python 3.12 required | rdrpcatch, mmseqs2 |
+| `rnavirhost` | any | pandas=2.0.3, sklearn=1.1.3, xgboost=1.7.4 pinned | rnavirhost, prodigal |
+
+The per-process conda env overrides for `RDRPCATCH` and `RNAVIRHOST` are set
+in `nextflow.config` via `withName` selectors. Nextflow activates the correct
+environment automatically for each process — no manual switching required.
+
 ### Memory configuration across clusters
 
 | Cluster config | Profile | Notes |
@@ -384,31 +446,25 @@ nextflow run main.nf ...
 | `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Custom profile — omits `--mem` flag |
 | 128-CPU / 2TB exclusive nodes | `cluster` | Custom profile — `--exclusive`, 128 CPUs, memory=null |
 
-`slurm_nomem` and `cluster` are custom profiles defined in `nextflow.config`;
-they are not built-in Nextflow terms.
+All three are custom profiles defined in `nextflow.config` — not built-in
+Nextflow terms.
 
 ### BLAST database staging
 
 BLAST databases are passed as `val` strings (not `path` inputs) to prevent
-Nextflow from staging only the `.fna` file away from its index files. All
-index files must remain in the same directory as the database file.
+Nextflow from staging only the `.fna` file away from its index files.
 
-### geNomad output path naming
+### hmmsearch trusted cutoffs
 
-geNomad names its output subdirectories after the input FASTA filename
-(without extension), using `${input_fasta.baseName}` in the module. If
-the input FASTA has a compound extension (e.g. `votus.final.fasta`),
-`baseName` strips only the last extension → `votus.final`. Rename the
-input file to a simple name if needed.
+`HMMSEARCH` attempts `--cut_tc` first (trusted cutoffs embedded in profiles
+such as Pfam and VOG). If the profile has no TC thresholds, it falls back to
+`--domE` with the value from `--hmm_evalue`. The fallback is logged to stderr.
 
-### Pending bin/ scripts
+### Pending scripts
 
-The following scripts are not yet implemented; their modules are stubbed
-and will be updated when the scripts are uploaded:
+The following are stubbed and will be finalized in future sessions:
 
 | Script | Used by | Status |
 |---|---|---|
-| `merge_annotations.py` | `MERGE_ANNOTATIONS` | pending upload |
-| `guess_host.py` | `GUESS_HOST` | pending upload |
-| `run_rnavirhost.py` | `RNAVIRHOST` | pending upload |
+| `guess_host.py` | `GUESS_HOST` | uploaded, integration pending |
 | `annotation_summary.py` | `ANNOTATION_SUMMARY` | to be written |
