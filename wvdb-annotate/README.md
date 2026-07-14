@@ -468,3 +468,8 @@ The following are stubbed and will be finalized in future sessions:
 |---|---|---|
 | `guess_host.py` | `GUESS_HOST` | uploaded, integration pending |
 | `annotation_summary.py` | `ANNOTATION_SUMMARY` | to be written |
+
+### Authorship
+This workflow was developed by Rose Kantor, as part of the Wastewater Virus Database Project.    
+
+Acknowledgement of AI tools: Claude Sonnet 4.6 contributed to scripting.
