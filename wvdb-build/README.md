@@ -2,7 +2,7 @@
 
 Viral genome database build pipeline. Collects viral and proviral genome
 assemblies across samples, clusters them by sequence identity, trims chimeric
-assemblies using pairwise alignments, assesses completeness with CheckV,
+assemblies using nucmer pairwise alignments, assesses completeness with CheckV,
 and produces a non-redundant set of representative genomes.
 
 This pipeline lives in the `wvdb-build/` subdirectory of the wvdb repository,
@@ -26,26 +26,31 @@ flowchart TD
 
     subgraph CT ["Step 3: Cluster trim"]
         E["PARSE_CLUSTERS + EXTRACT_TRIMMING_SEQS\nrank1/2/3 pairs + candidates.fasta"]
-        E --> F["MINIMAP2_PAIRWISE\nall-vs-all → alignments.paf.gz"]
-        F --> G["TRIM_FROM_PAF\nbest alignment across pairs12/13/23\n→ trimmed.fasta"]
-        G --> H["CHECKV → PICK_BEST_TRIM\ncompleteness split"]
+        E --> F12["TRIM_GENOMES trim12\nrank1 vs rank2"]
+        E --> F13["TRIM_GENOMES trim13\nrank1 vs rank3"]
+        E --> F23["TRIM_GENOMES trim23\nrank2 vs rank3"]
+        F12 --> G["MERGE_TRIMMED\nsuffixed IDs → all_trimmed.fasta"]
+        F13 --> G
+        F23 --> G
+        G --> H["CHECKV (one run)\nquality_summary.tsv"]
+        H --> I["PICK_BEST_TRIM\nbest per rank1 by completeness + length"]
     end
 
-    H -->|"complete ✓"| R
-    H -->|incomplete| D
+    I -->|"complete ✓"| R
+    I -->|incomplete| D
 
     subgraph BT ["Step 4: BLAST trim (optional)"]
         D["COLLECT_BLAST_INPUT\nsingletons + cluster-trim incomplete"]
-        D --> I["BLASTN initial db"]
-        D --> J["BLASTN secondary db\n(if run_secondary_blast=true)"]
-        I --> K["SELECT_BEST_BLAST_HIT\nprefer initial; secondary if no initial hit"]
-        J --> K
-        K -->|"no hit in either db"| U
-        K -->|"has hit"| L["TRIM_GENOMES_BLAST + CHECKV\nnucmer trim → completeness filter"]
+        D --> J["BLASTN initial db"]
+        D --> K["BLASTN secondary db\n(if run_secondary_blast=true)"]
+        J --> L["SELECT_BEST_BLAST_HIT\nprefer initial; secondary if no initial hit"]
+        K --> L
+        L -->|"no hit in either db"| U
+        L -->|"has hit"| M["TRIM_GENOMES_BLAST + CHECKV\nnucmer trim → completeness filter"]
     end
 
-    L -->|"complete ✓"| R
-    L -->|incomplete| U
+    M -->|"complete ✓"| R
+    M -->|incomplete| U
 
     U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv")]
 
@@ -72,6 +77,15 @@ flowchart TD
 | Singleton | → blast_trim | no hit or incomplete | `unvalidated_genomes.fasta` |
 | Any | — | — (run_initial_blast=false) | `unvalidated_genomes.fasta` |
 
+### Step 3 trimming detail
+
+All three trim passes (trim12, trim13, trim23) run in parallel using the
+pre-indexed `trimming_candidates.fasta`. Their outputs are merged with
+suffixed IDs (`<rank1_id>_trim12` etc.) so a **single CheckV run** covers
+all three. `PICK_BEST_TRIM` then selects the best result per rank1 sequence
+by completeness (primary) and length (tiebreaker), with trim12 preferred
+on a complete tie.
+
 ---
 
 ## Repository structure
@@ -79,26 +93,27 @@ flowchart TD
 ```
 wvdb-build/
 ├── main.nf                         # Entry point; wires all steps
-├── nextflow.config                 # Params, profiles (local, slurm, slurm_nomem, conda, test)
+├── nextflow.config                 # Params, profiles (local, slurm, slurm_nomem, cluster, conda, test)
 ├── conf/
 │   └── base.config                 # Per-process CPU/memory resource labels
 ├── modules/
 │   ├── collect.nf                  # Step 1: collect and merge input FASTAs
 │   ├── vclust.nf                   # Steps 2 & 5: vclust prefilter/align/cluster + centroids
-│   ├── cluster_trim_tools.nf       # Step 3 processes: parse_clusters, extract seqs,
-│   │                               #   minimap2, trim_from_paf, checkv, pick_best_trim
+│   ├── cluster_trim_tools.nf       # Step 3 processes: parse_clusters, extract_seqs,
+│   │                               #   trim_genomes (×3), merge_trimmed, checkv, pick_best_trim,
+│   │                               #   fetch_blast_input_seqs, completeness_filter
 │   ├── blast_trim_tools.nf         # Step 4 processes: blastn, blastani, select_best_hit,
-│   │                               #   trim_genomes, merge_trimmed, checkv,
+│   │                               #   trim_genomes_blast, merge_trimmed, checkv,
 │   │                               #   completeness_filter, collect_unvalidated
 │   └── summary.nf                  # PIPELINE_SUMMARY: sequence counts report
 ├── subworkflows/
-│   ├── cluster_trim.nf             # Step 3: minimap2-based cluster trimming
+│   ├── cluster_trim.nf             # Step 3: parallel nucmer trimming → single CheckV
 │   └── blast_trim.nf               # Step 4: BLAST-mode reference trimming (optional)
 ├── bin/                            # Python scripts (auto-added to PATH by Nextflow)
 │   ├── parse_clusters.py           # Extract rank1/2/3 pairs from vclust clusters
-│   ├── trim_from_paf.py            # Select best alignment per cluster from PAF, write BED
-│   ├── pick_best_trim.py           # Split trimmed seqs by CheckV completeness
-│   ├── trim_genomes.py             # Nucmer-based trimming for BLAST mode (step 4)
+│   ├── trim_genomes.py             # Nucmer-based trimming (cluster mode + BLAST mode)
+│   ├── merge_trimmed.py            # Combine trim12/13/23 FASTAs with suffixed IDs for CheckV
+│   ├── pick_best_trim.py           # Select best trimming per rank1 by completeness + length
 │   ├── select_best_blast_hit.py    # Route queries to initial or secondary db
 │   ├── blastani_nayfach.py         # Compute pairwise ANI from blastn tabular output
 │   ├── completeness_filter.py      # Filter sequences by CheckV completeness threshold
@@ -121,11 +136,9 @@ All tools are managed via the conda environment in `envs/wvdb_build.yml`.
 | Nextflow | ≥ 23.10 | Requires Java 11+ |
 | seqkit | 2.9.0 | |
 | vclust | 1.3.1 | |
-| minimap2 | ≥ 2.26 | Cluster-mode trimming (step 3) |
 | blastn | 2.16.0+ | Via `blast` conda package |
 | checkv | ≥ 1.0.3 | |
-| nucmer | 4.0.1 | BLAST-mode trimming (step 4); via `mummer4` conda package |
-| samtools | ≥ 1.18 | Provides `bgzip` for PAF compression |
+| nucmer | 4.0.1 | All trimming steps; via `mummer4` conda package |
 | diamond | ≥ 2.0.9 | CheckV hard dependency |
 | Python | 3.11 | biopython, pandas, numpy required by bin/ scripts |
 
@@ -151,20 +164,18 @@ conda activate wvdb-build
 ```bash
 seqkit version                    # seqkit v2.9.0
 vclust -v                         # vclust 1.3.1
-minimap2 --version                # 2.26+
 blastn -version                   # blastn: 2.16.0+
 checkv -h 2>&1 | head -1          # checkv 1.x
 nucmer --version                  # 4.0.1
 nextflow -v                       # nextflow version 23.x
-bgzip --version 2>&1 | head -1    # bgzip 1.18+
 ```
 
 Verify Python helper scripts:
 
 ```bash
-for script in parse_clusters.py trim_from_paf.py pick_best_trim.py \
-              trim_genomes.py select_best_blast_hit.py blastani_nayfach.py \
-              completeness_filter.py collect_unvalidated.py pipeline_summary.py; do
+for script in parse_clusters.py trim_genomes.py merge_trimmed.py pick_best_trim.py \
+              select_best_blast_hit.py blastani_nayfach.py completeness_filter.py \
+              collect_unvalidated.py pipeline_summary.py; do
     python bin/$script --help > /dev/null 2>&1 \
         && echo "OK: $script" \
         || echo "CHECK: $script"
@@ -204,18 +215,24 @@ because SLURM jobs do not inherit the interactive `conda activate`.
 
 For clusters where `DefMemPerNode=UNLIMITED` (memory not tracked per job),
 use the `slurm_nomem` profile instead of `slurm`. This is a custom profile
-defined in `nextflow.config` that omits the `--mem` flag from sbatch submissions,
-letting SLURM manage memory allocation automatically:
+defined in `nextflow.config` that omits the `--mem` flag from sbatch
+submissions, letting SLURM manage memory allocation automatically:
 
 ```bash
 nextflow run main.nf -profile slurm_nomem,conda ...
 ```
 
-For the dedicated 128-CPU / 2TB cluster nodes, use the `cluster` profile which
-requests full exclusive node access and sets threads/memory accordingly:
+For the dedicated 128-CPU / 2TB cluster nodes, use the `cluster` profile
+which requests full exclusive node access and sets threads/memory
+accordingly:
 
 ```bash
-nextflow run main.nf -profile cluster,conda     --fastqdir          /path/to/fastq     --outdir            /path/to/results     --checkvdb          /path/to/checkv-db     --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna     -resume
+nextflow run main.nf -profile cluster,conda \
+    --fastqdir          /path/to/fastq \
+    --outdir            /path/to/results \
+    --checkvdb          /path/to/checkv-db \
+    --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna \
+    -resume
 ```
 
 ### Initial BLAST database only (no secondary)
@@ -231,8 +248,8 @@ nextflow run main.nf -profile slurm,conda \
 
 ### Skipping BLAST trim entirely
 
-When `--run_initial_blast false`, all singletons and cluster-trim incomplete
-sequences go directly to `unvalidated/` with no BLAST search performed:
+When `--run_initial_blast false`, all singletons and cluster-trim
+incomplete sequences go directly to `unvalidated/` with no BLAST search:
 
 ```bash
 nextflow run main.nf -profile slurm,conda \
@@ -244,9 +261,6 @@ nextflow run main.nf -profile slurm,conda \
 ```
 
 ### Local development / macOS
-
-BLAST-mode trimming requires large reference databases not practical to run
-locally. Set `--run_initial_blast false` for local development:
 
 ```bash
 conda activate wvdb-build
@@ -306,19 +320,20 @@ outdir/
 │   ├── pairs13.tsv                     # rank1 vs rank3 pairs
 │   ├── pairs23.tsv                     # rank2 vs rank3 pairs
 │   ├── singletons.txt                  # 1-member clusters → step 4
-│   ├── candidate_ids.txt               # rank1/2/3 IDs for minimap2
+│   ├── candidate_ids.txt               # rank1/2/3 IDs for nucmer
 │   ├── trimming_candidates.fasta       # extracted rank1/2/3 sequences
-│   ├── alignments.paf.gz               # full minimap2 PAF (bgzipped) for network analysis
-│   ├── trimmed.fasta                   # best-trimmed sequence per cluster
-│   ├── trimming.bed                    # BED coordinates used for trimming
-│   ├── checkv/                         # CheckV quality assessment
+│   ├── trim12/                         # trim12 nucmer outputs
+│   ├── trim13/                         # trim13 nucmer outputs
+│   ├── trim23/                         # trim23 nucmer outputs
+│   ├── all_trimmed.fasta               # merged with suffixed IDs for CheckV
+│   ├── checkv/                         # CheckV quality assessment (single run)
 │   ├── complete_reps.fasta             # complete trimmed reps → step 5
 │   └── blast_trim_ids.txt              # incomplete cluster IDs → step 4
 ├── 4_blast_trim/                       # only created if run_initial_blast=true
 │   ├── blast_trim_input.fasta          # singletons + incomplete from step 3
 │   ├── initial/                        # blastn + blastani + trim outputs (initial db)
 │   ├── secondary/                      # blastn + blastani + trim outputs (secondary db)
-│   ├── blast_trimmed.fasta             # merged trimmed output (initial + secondary-only)
+│   ├── blast_trimmed.fasta             # merged trimmed output
 │   ├── checkv/                         # CheckV quality assessment
 │   └── cluster_reps_complete.fasta     # complete reps → step 5
 ├── unvalidated/
@@ -352,46 +367,34 @@ Nextflow resolves `./modules/`, `./subworkflows/`, and `./bin/` relative to
 ### Conda environment on the cluster
 
 SLURM jobs run in a fresh shell and do not inherit `conda activate` from the
-login session. Always use `-profile slurm,conda` for cluster runs. The `conda`
-profile sets `process.conda` so every submitted job activates the environment
-before running tools.
+login session. Always use `-profile slurm,conda` for cluster runs.
 
 ### BLAST database staging
 
 BLAST databases are passed as `val` strings (not `path` inputs) to prevent
-Nextflow from staging only the `.fna` file and leaving the index files behind.
-All index files must be present in the same directory as the `.fna` file.
+Nextflow from staging only the `.fna` file away from its index files. All
+index files must remain in the same directory as the database file.
 
 ### Memory configuration across clusters
 
 | Cluster config | Profile to use | Notes |
 |---|---|---|
 | `DefMemPerCPU` set | `slurm` | Explicit `--mem` requests work normally |
-| `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Custom profile — omits `--mem`; SLURM manages allocation |
+| `DefMemPerNode=UNLIMITED` | `slurm_nomem` | Custom profile — omits `--mem` flag |
 | 128-CPU / 2TB exclusive nodes | `cluster` | Custom profile — `--exclusive`, 128 CPUs, memory=null |
 
-All three are custom profiles defined in `nextflow.config` under the `profiles {}` block.
-`slurm_nomem` and `cluster` both set `process.memory = null` since those machines
-have `DefMemPerNode=UNLIMITED`.
+All three are custom profiles defined in `nextflow.config` under the `profiles {}`
+block — not built-in Nextflow terms. Override memory caps at runtime:
 
-Override memory caps at runtime for either profile:
 ```bash
 nextflow run main.nf --max_memory '120 GB' --max_memory_low '8 GB' ...
 ```
 
-### PAF output for network analysis
-
-`3_cluster_trim/alignments.paf.gz` contains the full minimap2 all-vs-all
-alignment of rank1/2/3 candidate sequences. This can be used to build a
-pairwise similarity network for downstream visualization (e.g. Cytoscape,
-gephi) or to re-examine clustering thresholds without rerunning minimap2.
-
 ### Updating the conda environment
 
 ```bash
-# Edit envs/wvdb_build.yml, then:
 mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
-# If mamba fails to solve, try removing and recreating:
+# If mamba fails to solve:
 # conda env remove -n wvdb-build
 # conda env create -f envs/wvdb_build.yml
 nextflow run main.nf -stub -profile local
