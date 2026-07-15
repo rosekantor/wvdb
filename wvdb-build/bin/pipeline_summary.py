@@ -195,8 +195,6 @@ def main():
                   n_singletons),
         count_row('2_nonsingletons',        '  Non-singleton clusters',
                   n_multi),
-        fasta_row('3_trimming_candidates',  'Rank1/2/3 trimming candidates',
-                  cand_stats),
         count_row('3_trim_source_trim12',   '  Best trimming source: trim12',
                   trim_src['trim12']),
         count_row('3_trim_source_trim13',   '  Best trimming source: trim13',
@@ -242,8 +240,7 @@ def main():
 | 2. Cluster | vclust clusters formed | {fmt(n_clusters)} | — | — |
 | | &nbsp;&nbsp;└ non-singleton clusters | {fmt(n_multi)} | — | — |
 | | &nbsp;&nbsp;└ singletons | {fmt(n_singletons)} | — | — |
-| 3. Cluster trim | Rank1/2/3 trimming candidates | {fmt(cand_stats[0] if cand_stats else None)} | — | — |
-| | &nbsp;&nbsp;└ best source: trim12 | {fmt(trim_src['trim12'])} | — | — |
+| 3. Cluster trim | Best trimming source: trim12 | {fmt(trim_src['trim12'])} | — | — |
 | | &nbsp;&nbsp;└ best source: trim13 | {fmt(trim_src['trim13'])} | — | — |
 | | &nbsp;&nbsp;└ best source: trim23 | {fmt(trim_src['trim23'])} | — | — |
 | | Complete trimmed reps | {fmt(n_ct_complete)} | {fmt(ct_complete[1] if ct_complete else None)} | {fmt(ct_complete[3] if ct_complete else None)} bp |
