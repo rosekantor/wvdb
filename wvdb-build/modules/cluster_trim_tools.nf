@@ -5,15 +5,16 @@
  * Process list:
  *   PARSE_CLUSTERS_ALL    — rank123 mode: all pair files + candidate IDs
  *   EXTRACT_TRIMMING_SEQS — seqkit grep: rank1/2/3 sequences into candidates.fasta
- *   MINIMAP2_PAIRWISE     — all-vs-all minimap2 on trimming candidates
- *   TRIM_FROM_PAF         — pick best alignment per cluster, write BED, seqkit subseq
- *   CHECKV                — checkv end_to_end
- *   PICK_BEST_TRIM        — split by completeness: complete → recluster, else → blast_trim
+ *   TRIM_GENOMES          — nucmer-based trimming (called 3× via aliases: trim12, trim13, trim23)
+ *   MERGE_TRIMMED         — combine all three trim FASTAs with suffixed IDs for CheckV
+ *   CHECKV                — checkv end_to_end (one run covers all three trimmings)
+ *   PICK_BEST_TRIM        — select best trimming per rank1 by CheckV completeness + length
  *   FETCH_BLAST_INPUT_SEQS — retrieve untrimmed seqs for blast_trim step
+ *   COMPLETENESS_FILTER   — used by blast_trim subworkflow (imported from here)
  *
  * Tools required in PATH:
- *   parse_clusters.py, trim_from_paf.py, pick_best_trim.py,
- *   seqkit, minimap2, bgzip, checkv (via bin/ or conda)
+ *   parse_clusters.py, trim_genomes.py, merge_trimmed.py, pick_best_trim.py,
+ *   seqkit, nucmer, show-coords, checkv (via bin/ or conda)
  */
 
 // ---------------------------------------------------------------------------
@@ -88,83 +89,88 @@ process EXTRACT_TRIMMING_SEQS {
 }
 
 // ---------------------------------------------------------------------------
-// MINIMAP2_PAIRWISE
-// All-vs-all minimap2 on trimming candidates (rank1/2/3 sequences only).
-// asm5 preset: <5% divergence, appropriate for sequences in the same cluster.
-// Full PAF published bgzipped for downstream network analysis.
+// TRIM_GENOMES
+// Nucmer-based trimming using pre-extracted trimming_candidates.fasta.
+// Called three times via aliases in cluster_trim.nf:
+//   TRIM_GENOMES     → trim12 (rank1 vs rank2, all clusters)
+//   TRIM_GENOMES_13  → trim13 (rank1 vs rank3, 3+-member clusters)
+//   TRIM_GENOMES_23  → trim23 (rank2 vs rank3, incomplete rank1 subset only)
+//
+// trim_genomes.py pre-builds a seqkit faidx index on candidates_fasta once,
+// then per-pair nucmer extractions use the small pre-indexed file.
+// tag_label scopes output filenames to avoid collisions between parallel calls.
 // ---------------------------------------------------------------------------
-process MINIMAP2_PAIRWISE {
+process TRIM_GENOMES {
     label 'cpu_high'
 
-    publishDir "${params.outdir}/3_cluster_trim", mode: 'copy',
-        enabled: !workflow.stubRun,
-        saveAs: { fn -> fn.endsWith('.gz') ? fn : null }
+    tag "${tag_label}"
+
+    publishDir { "${params.outdir}/${task.ext.publish_dir}/${tag_label}" }, mode: 'copy',
+        enabled: !workflow.stubRun
 
     input:
-    path candidates_fasta
+    path pairs_tsv    // pairs12/13/23.tsv
+    path candidates   // trimming_candidates.fasta (pre-indexed by trim_genomes.py)
+    val  tag_label    // "trim12", "trim13", or "trim23"
 
     output:
-    path "alignments.paf",    emit: paf
-    path "alignments.paf.gz", emit: paf_gz
+    path "${tag_label}.trimmed.fasta", emit: trimmed_fasta
+    path "${tag_label}.trimming.bed",  emit: trimming_bed
 
     script:
     """
-    minimap2 \\
-        -x asm5 \\
-        -c \\
-        --cs \\
-        -t ${task.cpus} \\
-        "${candidates_fasta}" \\
-        "${candidates_fasta}" \\
-        > alignments.paf
+    trim_genomes.py \\
+        -c "${pairs_tsv}" \\
+        -f "${candidates}" \\
+        -o . \\
+        -t ${task.cpus}
 
-    bgzip -c alignments.paf > alignments.paf.gz
+    mv trimmed.fasta ${tag_label}.trimmed.fasta
+    mv trimming.bed  ${tag_label}.trimming.bed
     """
 
     stub:
     """
-    touch alignments.paf alignments.paf.gz
+    touch ${tag_label}.trimmed.fasta ${tag_label}.trimming.bed
     """
 }
 
 // ---------------------------------------------------------------------------
-// TRIM_FROM_PAF
-// Reads PAF + all three pair files, picks best alignment per cluster by
-// alignment block length, writes BED, runs seqkit subseq → trimmed.fasta.
-// For rank12/13: rank1 is trimmed. For rank23: rank2 is trimmed.
+// MERGE_TRIMMED
+// Combines trim12, trim13, trim23 FASTAs into one FASTA with suffixed IDs
+// (<rank1_id>_trim12 etc.) so CheckV completeness can be attributed to each
+// trimming source in PICK_BEST_TRIM.
 // ---------------------------------------------------------------------------
-process TRIM_FROM_PAF {
-    label 'cpu_medium'
+process MERGE_TRIMMED {
+    label 'cpu_low'
 
     publishDir "${params.outdir}/3_cluster_trim", mode: 'copy',
         enabled: !workflow.stubRun
 
     input:
-    path paf
-    path pairs12
-    path pairs13
-    path pairs23
-    path candidates_fasta
+    path trim12_fasta
+    path trim13_fasta
+    path trim23_fasta
+    path pairs12          // needed to translate trim23 rank2 IDs → rank1
 
     output:
-    path "trimmed.fasta", emit: trimmed_fasta
-    path "trimming.bed",  emit: trimming_bed
+    path "all_trimmed.fasta", emit: all_trimmed_fasta
 
     script:
+    def trim13_arg = trim13_fasta.name.startsWith('NO_FILE') ? "" : "--trim13 \"${trim13_fasta}\""
+    def trim23_arg = trim23_fasta.name.startsWith('NO_FILE') ? "" : "--trim23 \"${trim23_fasta}\""
     """
-    trim_from_paf.py \\
-        --paf     "${paf}" \\
-        --pairs12 "${pairs12}" \\
-        --pairs13 "${pairs13}" \\
-        --pairs23 "${pairs23}" \\
-        --fasta   "${candidates_fasta}" \\
-        --outdir  . \\
-        --threads ${task.cpus}
+    merge_trimmed.py \\
+        --trim12   "${trim12_fasta}" \\
+        ${trim13_arg} \\
+        ${trim23_arg} \\
+        --pairs12  "${pairs12}" \\
+        --out      all_trimmed.fasta
     """
 
     stub:
     """
-    touch trimmed.fasta trimming.bed
+    touch all_trimmed.fasta
     """
 }
 
@@ -206,7 +212,9 @@ process CHECKV {
 
 // ---------------------------------------------------------------------------
 // PICK_BEST_TRIM
-// Splits trimmed output by CheckV completeness.
+// Selects the best trimming per rank1 cluster from trim12/13/23 results,
+// using CheckV completeness as primary criterion and length as tiebreaker.
+// Splits output into complete → step 5 and incomplete → step 4 (blast_trim).
 // ---------------------------------------------------------------------------
 process PICK_BEST_TRIM {
     label 'cpu_low'
@@ -215,26 +223,36 @@ process PICK_BEST_TRIM {
         enabled: !workflow.stubRun
 
     input:
-    path trimmed_fasta
+    path trim12_fasta
+    path trim13_fasta
+    path trim23_fasta
     path checkv_tsv
+    path pairs12          // needed to translate trim23 rank2 IDs → rank1
 
     output:
-    path "complete_reps.fasta",  emit: complete_fasta
-    path "blast_trim_ids.txt",   emit: blast_trim_ids
+    path "complete_reps.fasta",   emit: complete_fasta
+    path "blast_trim_ids.txt",    emit: blast_trim_ids
+    path "trim_selection.tsv",    emit: trim_log
 
     script:
+    def trim13_arg = trim13_fasta.name.startsWith('NO_FILE') ? "" : "--trim13 \"${trim13_fasta}\""
+    def trim23_arg = trim23_fasta.name.startsWith('NO_FILE') ? "" : "--trim23 \"${trim23_fasta}\""
     """
     pick_best_trim.py \\
-        --trimmed-fasta  "${trimmed_fasta}" \\
-        --checkv-tsv     "${checkv_tsv}" \\
-        --threshold      ${params.completeness} \\
-        --complete-fasta complete_reps.fasta \\
-        --blast-trim-ids blast_trim_ids.txt
+        --trim12    "${trim12_fasta}" \\
+        ${trim13_arg} \\
+        ${trim23_arg} \\
+        --checkv    "${checkv_tsv}" \\
+        --pairs12   "${pairs12}" \\
+        --threshold ${params.completeness} \\
+        --complete  complete_reps.fasta \\
+        --blast-ids blast_trim_ids.txt \\
+        --trim-log  trim_selection.tsv
     """
 
     stub:
     """
-    touch complete_reps.fasta blast_trim_ids.txt
+    touch complete_reps.fasta blast_trim_ids.txt trim_selection.tsv
     """
 }
 
@@ -312,3 +330,4 @@ process COMPLETENESS_FILTER {
     ${emit_incomplete_fasta ? 'touch cluster_reps_incomplete.fasta' : ''}
     """
 }
+

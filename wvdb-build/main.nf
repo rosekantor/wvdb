@@ -6,7 +6,8 @@
  *   1. Collect genomes    (COLLECT_GENOMES)
  *   2. Cluster            (VCLUST_PREFILTER → VCLUST_ALIGN → VCLUST_CLUSTER)
  *   3. Cluster trim       (CLUSTER_TRIM subworkflow)
- *                            minimap2 all-vs-all → pick best per cluster → CheckV
+ *                            trim12 ∥ trim13 ∥ trim23 (nucmer) → MERGE_TRIMMED
+ *                            → single CHECKV run → PICK_BEST_TRIM
  *   4. BLAST trim         (BLAST_TRIM subworkflow; controlled by params)
  *                            singletons + cluster-trim failures → BLAST → nucmer → CheckV
  *                            complete → recluster | no hit or incomplete → unvalidated
@@ -115,8 +116,8 @@ workflow {
 
     // -----------------------------------------------------------------------
     // Step 3 — Cluster-based trimming
-    //   minimap2 all-vs-all on rank1/2/3 candidates → pick best alignment
-    //   per cluster (pairs12/13/23) → CheckV → complete reps or blast_trim
+    //   trim12, trim13, trim23 run in parallel → single CheckV run
+    //   PICK_BEST_TRIM selects best per rank1 by completeness then length
     // -----------------------------------------------------------------------
     CLUSTER_TRIM(
         VCLUST_CLUSTER.out.clusters,
@@ -127,7 +128,7 @@ workflow {
 
     // -----------------------------------------------------------------------
     // Step 4 — BLAST-mode trimming
-    //   Receives singletons + incomplete sequences from step 3.
+    //   Receives singletons + incomplete from branches A and B of step 3.
     //   Optional: controlled by run_initial_blast and run_secondary_blast.
     //   Sequences with no BLAST hit or incomplete after trimming → unvalidated.
     // -----------------------------------------------------------------------
@@ -182,6 +183,7 @@ workflow {
         VCLUST_CLUSTER.out.clusters,
         CLUSTER_TRIM.out.trimming_candidates,
         CLUSTER_TRIM.out.complete_fasta,
+        CLUSTER_TRIM.out.trim_log,
         BLAST_TRIM.out.blast_trim_input,
         BLAST_TRIM.out.complete_fasta,
         BLAST_TRIM.out.unvalidated_fasta,

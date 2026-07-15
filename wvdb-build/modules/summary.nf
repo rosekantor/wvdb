@@ -21,6 +21,7 @@ process PIPELINE_SUMMARY {
     path clusters_tsv             // 2_clustered/vclust_clusters.tsv
     path trimming_candidates      // 3_cluster_trim/trimming_candidates.fasta
     path cluster_trim_complete    // 3_cluster_trim/complete_reps.fasta
+    path trim_log                 // 3_cluster_trim/trim_selection.tsv
     path blast_trim_input         // 4_blast_trim/blast_trim_input.fasta
     path blast_trim_complete      // 4_blast_trim/cluster_reps_complete.fasta
     path unvalidated_fasta        // unvalidated/unvalidated_genomes.fasta
@@ -33,6 +34,7 @@ process PIPELINE_SUMMARY {
     path "pipeline_summary.md",  emit: summary_md
 
     script:
+    def trim_log_arg     = !trim_log.name.startsWith('NO_FILE') ? "--trim-log ${trim_log}" : ""
     def blast_input_arg  = blast_trim_input.name  != 'NO_FILE' ? "--blast-trim-input  ${blast_trim_input}"  : ""
     def blast_compl_arg  = blast_trim_complete.name != 'NO_FILE' ? "--blast-trim-complete ${blast_trim_complete}" : ""
     def unval_fasta_arg  = unvalidated_fasta.name != 'NO_FILE' ? "--unvalidated-fasta  ${unvalidated_fasta}"  : ""
@@ -47,6 +49,7 @@ process PIPELINE_SUMMARY {
         ${blast_compl_arg} \\
         ${unval_fasta_arg} \\
         ${unval_report_arg} \\
+        ${trim_log_arg} \\
         --recluster-input       "${recluster_input}" \\
         --centroids             "${centroids}" \\
         --out-tsv               pipeline_summary.tsv \\
