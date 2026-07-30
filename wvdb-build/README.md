@@ -200,7 +200,7 @@ conda activate wvdb-build
 cd wvdb-build
 
 nextflow run main.nf -profile slurm,conda \
-    --fastqdir          /path/to/fastq \
+    --fasta_list        /path/to/fasta_list.txt \
     --outdir            /path/to/results \
     --checkvdb          /path/to/checkv-db-v1.5 \
     --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna \
@@ -228,7 +228,7 @@ accordingly:
 
 ```bash
 nextflow run main.nf -profile cluster,conda \
-    --fastqdir          /path/to/fastq \
+    --fasta_list        /path/to/fasta_list.txt \
     --outdir            /path/to/results \
     --checkvdb          /path/to/checkv-db \
     --initial_blastdb   /path/to/esviritu_plus_refseq_virus.fna \
@@ -239,7 +239,7 @@ nextflow run main.nf -profile cluster,conda \
 
 ```bash
 nextflow run main.nf -profile slurm,conda \
-    --fastqdir        /path/to/fastq \
+    --fasta_list      /path/to/fasta_list.txt \
     --outdir          /path/to/results \
     --checkvdb        /path/to/checkv-db \
     --initial_blastdb /path/to/esviritu_plus_refseq_virus.fna \
@@ -253,7 +253,7 @@ incomplete sequences go directly to `unvalidated/` with no BLAST search:
 
 ```bash
 nextflow run main.nf -profile slurm,conda \
-    --fastqdir          /path/to/fastq \
+    --fasta_list        /path/to/fasta_list.txt \
     --outdir            /path/to/results \
     --checkvdb          /path/to/checkv-db \
     --run_initial_blast false \
@@ -267,7 +267,7 @@ conda activate wvdb-build
 cd wvdb-build
 
 nextflow run main.nf -profile local \
-    --fastqdir          /path/to/fastq \
+    --fasta_list        /path/to/fasta_list.txt \
     --outdir            /path/to/results \
     --checkvdb          /path/to/checkv-db \
     --run_initial_blast false \
@@ -277,11 +277,43 @@ nextflow run main.nf -profile local \
 
 ---
 
+## Input file: fasta_list.txt
+
+`--fasta_list` points to a plain text file listing the virus and provirus
+FASTA files to merge, one absolute path per line:
+
+```
+/p/vast1/mlbiomon/.../batch1/assembly/sample_all/filtered_virus_all.fasta
+/p/vast1/mlbiomon/.../batch1/assembly/sample_all/filtered_provirus_all.fasta
+/p/vast1/mlbiomon/.../batch2/assembly/sample_all/filtered_virus_all.fasta
+/p/vast1/mlbiomon/.../batch2/assembly/sample_all/filtered_provirus_all.fasta
+```
+
+Generate it with `find`:
+
+```bash
+find /path/to/assemblies/ \
+    -name "filtered_virus*.fasta" -o -name "filtered_provirus*.fasta" \
+    | sort > fasta_list.txt
+```
+
+> **Paths must be absolute.** Relative paths are resolved by the shell
+> inside each process's isolated work directory, not the directory you run
+> `nextflow run` from — so a relative path that looks correct at the
+> command line will not resolve correctly inside the pipeline. Always use
+> full absolute paths in `fasta_list.txt`.
+
+Lines are classified by filename: any line containing `provirus` is treated
+as a provirus FASTA; any other line containing `virus` is treated as a virus
+FASTA. Empty lines and lines starting with `#` are ignored.
+
+---
+
 ## Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--fastqdir` | required | Top-level input dir; expects `<sample>/assembly/<run>/filtered_*.fasta` |
+| `--fasta_list` | required | Text file listing absolute paths to virus/provirus FASTAs (one per line) |
 | `--outdir` | required | Output directory |
 | `--checkvdb` | required | CheckV database directory (e.g. `checkv-db-v1.5`) |
 | `--initial_blastdb` | null | Primary BLAST reference db — required if `run_initial_blast=true` |

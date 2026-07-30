@@ -1,3 +1,4 @@
+test/data/fasta_list.txt
 .nextflow/
 .nextflow.log*
 work/

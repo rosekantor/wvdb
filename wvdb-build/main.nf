@@ -20,7 +20,7 @@
  *   --secondary_blastdb   /path/to/db (required if run_secondary_blast=true)
  *
  * Usage:
- *   nextflow run main.nf -profile slurm,conda [--fastqdir /path] [--outdir /path]
+ *   nextflow run main.nf -profile slurm,conda [--fasta_list /path/to/fasta_list.txt] [--outdir /path]
  *   nextflow run main.nf -stub -profile local   # validate DAG
  */
 
@@ -44,7 +44,7 @@ workflow {
     // Parameter validation
     // -----------------------------------------------------------------------
     def errors = []
-    if (!params.fastqdir) errors << "  --fastqdir is required"
+    if (!params.fasta_list) errors << "  --fasta_list is required"
     if (!params.outdir)   errors << "  --outdir is required"
     if (!params.checkvdb) errors << "  --checkvdb is required"
     if (params.run_initial_blast && !params.initial_blastdb)
@@ -68,7 +68,7 @@ workflow {
     ============================================
      wvdb_build: viral genome database pipeline
     ============================================
-     fastqdir           : ${params.fastqdir}
+     fasta_list         : ${params.fasta_list}
      outdir             : ${params.outdir}
      ani                : ${params.ani}
      qcov               : ${params.qcov}
@@ -81,7 +81,7 @@ workflow {
 
     def check = !workflow.stubRun
     checkvdb         = file(params.checkvdb, checkIfExists: check)
-    fastqdir         = file(params.fastqdir, checkIfExists: check)
+    fasta_list       = file(params.fasta_list, checkIfExists: check)
     // BLAST dbs passed as strings (not file objects) to prevent staging —
     // all index files (.nhr .nin .nsq etc.) must remain in the same directory
     initial_blastdb   = params.initial_blastdb   ?: ''
@@ -90,7 +90,7 @@ workflow {
     // -----------------------------------------------------------------------
     // Step 1 — Collect and merge input genomes
     // -----------------------------------------------------------------------
-    COLLECT_GENOMES(fastqdir)
+    COLLECT_GENOMES(fasta_list)
 
     // -----------------------------------------------------------------------
     // Step 2 — Initial clustering with vclust
