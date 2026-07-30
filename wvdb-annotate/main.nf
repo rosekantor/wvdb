@@ -8,10 +8,10 @@
  *   3. RdRPCATCH       — RdRP detection (optional, default: true)
  *   4. BLASTn × N dbs  — nucleotide search (optional, default: true)
  *      └─ BLASTani       — pairwise ANI from BLASTn output
- *   5. DIAMOND         — protein search vs NCBI-nr (optional, default: false)
- *                        uses geNomad-predicted proteins
+ *   5. CHARACTERIZE_PROTEINS — DIAMOND × N + hmmsearch × N (optional; uses
+ *                        geNomad-predicted proteins; default: both false)
  *   6. RNAVirHost      — host prediction (optional, default: true)
- *                        requires CheckV + geNomad output
+ *                        requires CheckV + geNomad + RdRPCATCH output
  *   7. MERGE_ANNOTATIONS — combine all outputs per vOTU
  *   8. GUESS_HOST      — ensemble LLM host prediction (optional, default: false)
  *   9. ANNOTATION_SUMMARY — per-step counts report
@@ -39,7 +39,6 @@ include { GENOMAD            } from './modules/genomad'
 include { RDRPCATCH          } from './modules/rdrpcatch'
 include { BLASTN             } from './modules/blastn_tools'
 include { BLASTANI           } from './modules/blastn_tools'
-include { DIAMOND            } from './modules/diamond'
 include { RNAVIRHOST         } from './modules/rnavirhost'
 include { PREPARE_ICTV       } from './modules/summary'
 include { MERGE_ANNOTATIONS  } from './modules/summary'
@@ -200,9 +199,6 @@ workflow {
     } else {
         blastn_ani_tsvs = Channel.of(file('NO_FILE_BLASTN'))
     }
-
-    // DIAMOND is now handled in CHARACTERIZE_PROTEINS subworkflow (Step 3)
-    diamond_tsv = Channel.of(file('NO_FILE_DIAMOND'))
 
     // -----------------------------------------------------------------------
     // Step 6 — RNAVirHost host prediction (optional)
