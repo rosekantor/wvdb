@@ -278,6 +278,33 @@ nextflow run main.nf -profile cluster,conda \
     -resume
 ```
 
+> **Avoiding unnecessary conda environment recreation:** by default, `-profile
+> conda` points each environment-sensitive process at a yml file
+> (`envs/wvdb_annotate.yml`, `envs/wvdb_rdrpcatch.yml`, `envs/wvdb_rnavirhost.yml`).
+> When Nextflow sees a **yml path**, it always creates a fresh environment from
+> it and caches that build under `work/conda/` — it does not search your conda
+> installation for an existing environment with the same name. If you have
+> already created `wvdb-annotate`, `rdrpcatch`, and `rnavirhost` environments
+> manually, pass their **existing paths** instead of relying on the yml
+> defaults, so Nextflow activates them directly with no build step:
+>
+> ```bash
+> conda env list   # find exact paths
+>
+> nextflow run main.nf -profile cluster,conda \
+>     --conda_env             /path/to/conda/envs/wvdb-annotate \
+>     --rdrpcatch_conda_env   /path/to/conda/envs/rdrpcatch \
+>     --rnavirhost_conda_env  /path/to/conda/envs/rnavirhost \
+>     --input_fasta   /path/to/votus_final.fasta \
+>     --outdir        /path/to/results \
+>     --checkvdb      /path/to/checkv-db-v1.5 \
+>     --genomad_db    /path/to/genomad_db \
+>     --rdrpcatch_db  /path/to/rdrp_catch_db \
+>     --databases     /path/to/databases.csv \
+>     --entrez_email  user@institution.edu \
+>     -resume
+> ```
+
 ### With protein characterization enabled
 
 ```bash
@@ -338,8 +365,8 @@ nextflow run main.nf -profile cluster,conda \
 | `--max_memory` | `'64 GB'` | Memory cap for high/medium-CPU processes |
 | `--max_memory_low` | `'16 GB'` | Memory cap for low-CPU processes |
 | `--max_time` | `'24 h'` | Maximum runtime for any process |
-| `--rdrpcatch_conda_env` | auto | Path to rdrpcatch conda env (default: `envs/wvdb_rdrpcatch.yml`) |
-| `--rnavirhost_conda_env` | auto | Path to rnavirhost conda env (default: `envs/wvdb_rnavirhost.yml`) |
+| `--rdrpcatch_conda_env` | `envs/wvdb_rdrpcatch.yml` | Path to rdrpcatch env or yml. **yml path → creates new env each time**; existing env path → activates directly, no rebuild |
+| `--rnavirhost_conda_env` | `envs/wvdb_rnavirhost.yml` | Path to rnavirhost env or yml. Same yml-vs-path behavior as above |
 
 ---
 
@@ -468,8 +495,3 @@ The following are stubbed and will be finalized in future sessions:
 |---|---|---|
 | `guess_host.py` | `GUESS_HOST` | uploaded, integration pending |
 | `annotation_summary.py` | `ANNOTATION_SUMMARY` | to be written |
-
-### Authorship
-This workflow was developed by Rose Kantor, as part of the Wastewater Virus Database Project.    
-
-Acknowledgement of AI tools: Claude Sonnet 4.6 contributed to scripting.
