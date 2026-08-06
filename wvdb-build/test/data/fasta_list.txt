@@ -1,0 +1,8 @@
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample1/filtered_provirus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample1/filtered_virus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample2/filtered_provirus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample2/filtered_virus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample3/filtered_provirus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample3/filtered_virus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample4/filtered_provirus.fasta
+/Users/kantor4/work/trilab_ldrd/wvdb/wvdb-build/test/data/batch1/assembly/sample4/filtered_virus.fasta

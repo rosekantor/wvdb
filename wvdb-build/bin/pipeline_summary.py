@@ -85,6 +85,31 @@ def count_unvalidated(report_path):
     return df['reason'].value_counts().to_dict()
 
 
+def load_dedup_report(path):
+    """
+    Return summary counts from dedup_report.tsv:
+    {n_flagged, n_corrected, n_flagged_review, n_tandem, n_inverted}.
+    All zero if path is missing/empty.
+    """
+    defaults = dict(n_flagged=0, n_corrected=0, n_flagged_review=0,
+                    n_tandem=0, n_inverted=0)
+    if not path:
+        return defaults
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return defaults
+    df = pd.read_csv(p, sep='\t')
+    if df.empty:
+        return defaults
+    defaults['n_flagged']        = len(df)
+    defaults['n_corrected']      = (df['decision'] == 'corrected').sum()
+    defaults['n_flagged_review'] = (df['decision'] == 'flagged_for_review').sum()
+    if 'orientation' in df.columns:
+        defaults['n_tandem']   = (df['orientation'] == 'tandem').sum()
+        defaults['n_inverted'] = (df['orientation'] == 'inverted').sum()
+    return defaults
+
+
 def load_trim_log(path):
     """Return {source: count} from trim_selection.tsv."""
     defaults = {'trim12': 0, 'trim13': 0, 'trim23': 0}
@@ -150,6 +175,8 @@ def main():
     p.add_argument('--blast-trim-complete',   default=None)
     p.add_argument('--unvalidated-fasta',     default=None)
     p.add_argument('--unvalidated-report',    default=None)
+    p.add_argument('--dedup-report',          default=None,
+                   help='dedup_report.tsv from DEDUPLICATE_GENOMES')
     p.add_argument('--recluster-input',       default=None)
     p.add_argument('--centroids',             required=True)
     p.add_argument('--out-tsv',               required=True)
@@ -171,6 +198,7 @@ def main():
     unval_reasons  = count_unvalidated(args.unvalidated_report)
     reclust_stats  = count_fasta(args.recluster_input)
     centroid_stats = count_fasta(args.centroids)
+    dedup_stats    = load_dedup_report(args.dedup_report)
 
     n_input        = all_stats[0]      if all_stats      else 0
     n_clusters     = cluster_counts[1]
@@ -182,7 +210,7 @@ def main():
     n_unval        = unval_stats[0]    if unval_stats    else 0
     n_reclust      = reclust_stats[0]  if reclust_stats  else 0
     n_centroids    = centroid_stats[0] if centroid_stats else 0
-    unval_no_hit   = unval_reasons.get('no_blast_hit', 0)
+    unval_no_hit   = unval_reasons.get('no_qualifying_hit', 0)
     unval_incomp   = unval_reasons.get('incomplete_after_trimming', 0)
 
     # --- Build DataFrame ---
@@ -207,13 +235,23 @@ def main():
                   bt_input),
         fasta_row('4_blast_trim_complete',  'BLAST-trimmed complete representatives',
                   bt_complete),
-        count_row('unvalidated_no_hit',     'Unvalidated: no BLAST hit',
+        count_row('unvalidated_no_hit',     'Unvalidated: no qualifying BLAST hit',
                   unval_no_hit),
         count_row('unvalidated_incomplete', 'Unvalidated: incomplete after trimming',
                   unval_incomp),
         fasta_row('unvalidated_total',      'Unvalidated total',
                   unval_stats),
-        fasta_row('5_recluster_input',      'All complete reps entering reclustering',
+        count_row('5a_dedup_flagged',       'Whole-genome duplication candidates flagged (kmer_freq)',
+                  dedup_stats['n_flagged']),
+        count_row('5a_dedup_corrected',     '  Auto-corrected (clean duplication)',
+                  dedup_stats['n_corrected']),
+        count_row('5a_dedup_tandem',        '    tandem orientation',
+                  dedup_stats['n_tandem']),
+        count_row('5a_dedup_inverted',      '    inverted orientation',
+                  dedup_stats['n_inverted']),
+        count_row('5a_dedup_flagged_review','  Flagged for manual review (ambiguous)',
+                  dedup_stats['n_flagged_review']),
+        fasta_row('5_recluster_input',      'All complete reps entering reclustering (post-dedup)',
                   reclust_stats),
         fasta_row('5_centroids',            'Final non-redundant centroids',
                   centroid_stats),
@@ -246,10 +284,15 @@ def main():
 | | Complete trimmed reps | {fmt(n_ct_complete)} | {fmt(ct_complete[1] if ct_complete else None)} | {fmt(ct_complete[3] if ct_complete else None)} bp |
 | 4. BLAST trim | Input (singletons + incomplete) | {fmt(n_bt_input)} | — | — |
 | | Complete trimmed reps | {fmt(n_bt_complete)} | {fmt(bt_complete[1] if bt_complete else None)} | {fmt(bt_complete[3] if bt_complete else None)} bp |
-| Unvalidated | No BLAST hit | {fmt(unval_no_hit)} | — | — |
+| Unvalidated | No qualifying BLAST hit | {fmt(unval_no_hit)} | — | — |
 | | Incomplete after trimming | {fmt(unval_incomp)} | — | — |
 | | Total unvalidated | {fmt(n_unval)} | {fmt(unval_stats[1] if unval_stats else None)} | {fmt(unval_stats[3] if unval_stats else None)} bp |
-| 5. Recluster | Input (cluster + blast trim complete) | {fmt(n_reclust)} | {fmt(reclust_stats[1] if reclust_stats else None)} | {fmt(reclust_stats[3] if reclust_stats else None)} bp |
+| 5a. Deduplication | Whole-genome duplication candidates flagged | {fmt(dedup_stats['n_flagged'])} | — | — |
+| | &nbsp;&nbsp;└ auto-corrected | {fmt(dedup_stats['n_corrected'])} | — | — |
+| | &nbsp;&nbsp;&nbsp;&nbsp;└ tandem | {fmt(dedup_stats['n_tandem'])} | — | — |
+| | &nbsp;&nbsp;&nbsp;&nbsp;└ inverted | {fmt(dedup_stats['n_inverted'])} | — | — |
+| | &nbsp;&nbsp;└ flagged for manual review | {fmt(dedup_stats['n_flagged_review'])} | — | — |
+| 5. Recluster | Input (post-dedup) | {fmt(n_reclust)} | {fmt(reclust_stats[1] if reclust_stats else None)} | {fmt(reclust_stats[3] if reclust_stats else None)} bp |
 | **5. Final** | **Non-redundant centroids** | **{fmt(n_centroids)}** | **{fmt(centroid_stats[1] if centroid_stats else None)}** | **{fmt(centroid_stats[3] if centroid_stats else None)} bp** |
 
 ---

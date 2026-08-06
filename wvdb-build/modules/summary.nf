@@ -26,6 +26,7 @@ process PIPELINE_SUMMARY {
     path blast_trim_complete      // 4_blast_trim/cluster_reps_complete.fasta
     path unvalidated_fasta        // unvalidated/unvalidated_genomes.fasta
     path unvalidated_report       // unvalidated/unvalidated_report.tsv
+    path dedup_report             // dedup/dedup_report.tsv (or NO_FILE_DEDUP)
     path recluster_input          // 5_reclustered/recluster_input.fasta
     path centroids                // 5_reclustered/vclust_centroids.fasta
 
@@ -39,6 +40,7 @@ process PIPELINE_SUMMARY {
     def blast_compl_arg  = blast_trim_complete.name != 'NO_FILE' ? "--blast-trim-complete ${blast_trim_complete}" : ""
     def unval_fasta_arg  = unvalidated_fasta.name != 'NO_FILE' ? "--unvalidated-fasta  ${unvalidated_fasta}"  : ""
     def unval_report_arg = unvalidated_report.name != 'NO_FILE' ? "--unvalidated-report ${unvalidated_report}" : ""
+    def dedup_report_arg = !dedup_report.name.startsWith('NO_FILE') ? "--dedup-report ${dedup_report}" : ""
     """
     pipeline_summary.py \\
         --all-fasta             "${all_fasta}" \\
@@ -50,6 +52,7 @@ process PIPELINE_SUMMARY {
         ${unval_fasta_arg} \\
         ${unval_report_arg} \\
         ${trim_log_arg} \\
+        ${dedup_report_arg} \\
         --recluster-input       "${recluster_input}" \\
         --centroids             "${centroids}" \\
         --out-tsv               pipeline_summary.tsv \\

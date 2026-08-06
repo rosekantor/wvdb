@@ -123,7 +123,8 @@ process TRIM_GENOMES {
         -c "${pairs_tsv}" \\
         -f "${candidates}" \\
         -o . \\
-        -t ${task.cpus}
+        -t ${task.cpus} \\
+        --min-identity ${(params.ani * 100) - params.trim_identity_buffer}
 
     mv trimmed.fasta ${tag_label}.trimmed.fasta
     mv trimming.bed  ${tag_label}.trimming.bed

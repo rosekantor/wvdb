@@ -36,6 +36,9 @@ include { VCLUST_CLUSTER   as VCLUST_CLUSTER_RECLUST        } from './modules/vc
 include { GET_CENTROIDS                                     } from './modules/vclust'
 include { CLUSTER_TRIM                                      } from './subworkflows/cluster_trim'
 include { BLAST_TRIM                                        } from './subworkflows/blast_trim'
+include { DEDUPLICATE_GENOMES                               } from './modules/dedup_tools'
+include { CHECKV as CHECKV_PRE_DEDUP                        } from './modules/cluster_trim_tools'
+include { CHECKV as CHECKV_CORRECTED                        } from './modules/cluster_trim_tools'
 include { PIPELINE_SUMMARY                                  } from './modules/summary'
 
 workflow {
@@ -76,6 +79,7 @@ workflow {
      threads            : ${params.threads}
      run_initial_blast  : ${params.run_initial_blast}
      run_secondary_blast: ${params.run_secondary_blast}
+     run_deduplication  : ${params.run_deduplication}
     ============================================
     """.stripIndent()
 
@@ -151,13 +155,44 @@ workflow {
         .mix(BLAST_TRIM.out.complete_fasta)
         .collectFile(name: "recluster_input.fasta")
 
+    // -----------------------------------------------------------------------
+    // Step 5a — Detect and correct whole-genome duplications (optional)
+    //   Some assemblies contain a genome duplicated as two tandem or
+    //   inverted-repeat copies (CheckV kmer_freq ~2.0). Detected via
+    //   alignment-based probing; only clean, unambiguous cases are
+    //   auto-corrected — anything irregular (e.g. rotated repeats) is
+    //   left untouched and flagged for manual review.
+    // -----------------------------------------------------------------------
+    if ( params.run_deduplication ) {
+        CHECKV_PRE_DEDUP(
+            recluster_input,
+            checkvdb
+        )
+
+        DEDUPLICATE_GENOMES(
+            recluster_input,
+            CHECKV_PRE_DEDUP.out.quality_summary
+        )
+
+        CHECKV_CORRECTED(
+            DEDUPLICATE_GENOMES.out.corrected_fasta,
+            checkvdb
+        )
+
+        recluster_input_final = DEDUPLICATE_GENOMES.out.deduplicated_fasta
+        dedup_report          = DEDUPLICATE_GENOMES.out.report_tsv
+    } else {
+        recluster_input_final = recluster_input
+        dedup_report          = Channel.of(file('NO_FILE_DEDUP'))
+    }
+
     VCLUST_PREFILTER_RECLUST(
-        recluster_input,
+        recluster_input_final,
         params.ani
     )
 
     VCLUST_ALIGN_RECLUST(
-        recluster_input,
+        recluster_input_final,
         VCLUST_PREFILTER_RECLUST.out.prefilter,
         params.ani,
         params.qcov
@@ -172,7 +207,7 @@ workflow {
 
     GET_CENTROIDS(
         VCLUST_CLUSTER_RECLUST.out.clusters,
-        recluster_input
+        recluster_input_final
     )
 
     // -----------------------------------------------------------------------
@@ -188,7 +223,8 @@ workflow {
         BLAST_TRIM.out.complete_fasta,
         BLAST_TRIM.out.unvalidated_fasta,
         BLAST_TRIM.out.unvalidated_report,
-        recluster_input,
+        dedup_report,
+        recluster_input_final,
         GET_CENTROIDS.out.centroid_fasta
     )
 }

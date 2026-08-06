@@ -62,7 +62,7 @@ def main():
     # Build reason map
     reason = {}
     for id_ in no_hit_ids:
-        reason[id_] = 'no_blast_hit'
+        reason[id_] = 'no_qualifying_hit'
     for id_ in incomplete_ids:
         # incomplete takes priority if somehow in both sets
         reason[id_] = 'incomplete_after_trimming'
@@ -94,7 +94,7 @@ def main():
 
     print(f"[collect_unvalidated] unvalidated sequences  : {len(all_unvalidated)}",
           file=sys.stderr)
-    print(f"[collect_unvalidated]   no blast hit         : {len(no_hit_ids)}",
+    print(f"[collect_unvalidated]   no qualifying hit    : {len(no_hit_ids)}",
           file=sys.stderr)
     print(f"[collect_unvalidated]   incomplete after trim: {len(incomplete_ids)}",
           file=sys.stderr)

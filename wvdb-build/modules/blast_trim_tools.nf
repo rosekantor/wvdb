@@ -149,9 +149,13 @@ process BLASTANI {
 
 // ---------------------------------------------------------------------------
 // SELECT_BEST_BLAST_HIT
-// Routes each query to the initial or secondary db hit.
-// Initial db is preferred when both have hits; secondary used only for queries
-// with no initial hit. Queries with no hit in either db → no_hit_ids.txt.
+// Routes each query to the initial or secondary db hit, requiring a
+// "qualifying" hit: tcov >= params.blast_trim_min_tcov AND
+// pid >= params.blast_trim_min_pid. Initial db is preferred when both
+// have a qualifying hit; secondary used only for queries with no
+// qualifying initial hit. Queries with no qualifying hit in either db
+// (including queries with a low-coverage/low-identity hit that doesn't
+// clear the threshold) → no_hit_ids.txt → unvalidated (no_qualifying_hit).
 // secondary_ani may be an empty file when run_secondary_blast=false.
 // ---------------------------------------------------------------------------
 process SELECT_BEST_BLAST_HIT {
@@ -178,7 +182,9 @@ process SELECT_BEST_BLAST_HIT {
         --initial-out   initial_hits.tsv \\
         --secondary-out secondary_hits.tsv \\
         --no-hit-ids    no_hit_ids.txt \\
-        --all-query-ids "${query_ids}"
+        --all-query-ids "${query_ids}" \\
+        --min-tcov      ${params.blast_trim_min_tcov} \\
+        --min-pid       ${params.blast_trim_min_pid}
     """
 
     stub:
@@ -218,7 +224,8 @@ process TRIM_GENOMES_BLAST {
         -f "${query_fasta}" \\
         -d "${blastdb}" \\
         -o . \\
-        -t ${task.cpus}
+        -t ${task.cpus} \\
+        --min-identity ${params.blast_trim_min_pid - params.trim_identity_buffer}
 
     mv trimmed.fasta ${db_name}.trimmed.fasta
     mv trimming.bed  ${db_name}.trimming.bed

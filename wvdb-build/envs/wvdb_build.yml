@@ -20,18 +20,17 @@ dependencies:
   - bioconda::blast=2.16.0        # provides blastn, makeblastdb
   - bioconda::checkv>=1.0.3        # pin to 1.0.3 — newer versions have macOS ARM64 conflicts
   - bioconda::mummer4=4.0.1       # provides nucmer; package name is mummer4 on bioconda
-  - bioconda::minimap2             # pairwise alignment for cluster trim step (>=2.26)
-  - bioconda::samtools             # provides bgzip (>=1.18)
 
   # --- checkv hard dependency: pin diamond to exact version ---
   - bioconda::diamond>=2.0.9        # checkv 1.0.3 requires diamond==2.0.9
 
   # --- Python packages used by helper scripts in bin/ ---
-  # confirmed from imports: Bio.SeqIO, numpy, pandas
+  # confirmed from imports: Bio.SeqIO, numpy, pandas, matplotlib
   # (collections, glob, os, re, shutil, subprocess, sys, etc. are stdlib — no entry needed)
   - conda-forge::biopython>=1.80
   - conda-forge::pandas>=1.5
   - conda-forge::numpy>=1.23
+  - conda-forge::matplotlib>=3.5    # self-alignment plots in detect_genome_duplication.py
 
   # --- Nextflow runtime (Java) ---
   # Nextflow requires Java 11+; bundled here so the env is fully self-contained

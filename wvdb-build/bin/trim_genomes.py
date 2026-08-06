@@ -108,17 +108,22 @@ def extract_targets(pairs_df, target_fasta, fastadir, threads):
 # BLAST mode pair extraction (unchanged from original)
 # ---------------------------------------------------------------------------
 
-def get_alns(blastani_file, qcov=85, tcov=85):
+def get_alns(blastani_file):
     """
     Load BLAST ANI results and derive query/target pairs DataFrame.
-    Filters on qcov OR tcov >= threshold, keeps best hit per query.
+    Keeps best hit per query by pid (highest identity).
+
+    Rows arriving here have already been filtered to "qualifying" hits
+    (tcov + pid thresholds) by select_best_blast_hit.py upstream — this
+    function does not re-apply any coverage/identity filter itself, to
+    avoid a second, differently-defined threshold silently dropping
+    queries that already passed the upstream check.
     """
     ani_df = pd.read_csv(blastani_file, sep='\t')
-    ani_df = ani_df[(ani_df.qcov >= qcov) | (ani_df.tcov >= tcov)]
     if ani_df.empty:
-        print("Warning: no BLAST ANI hits passed coverage filters.", file=sys.stderr)
+        print("Warning: ANI file is empty — no pairs to align.", file=sys.stderr)
         return pd.DataFrame(columns=["qname", "tname"])
-    idx = ani_df.groupby('qname')['qcov'].idxmax()
+    idx = ani_df.groupby('qname')['pid'].idxmax()
     return ani_df.loc[idx][['qname', 'tname']]
 
 
@@ -126,19 +131,30 @@ def get_alns(blastani_file, qcov=85, tcov=85):
 # Per-pair alignment (parallel worker)
 # ---------------------------------------------------------------------------
 
-def pull_aln(row_id, query, target, query_fasta, target_fasta, fastadir, alndir):
+def pull_aln(row_id, query, target, query_fasta, target_fasta, fastadir, alndir, min_identity):
     """
     Extract one query and one target sequence, align with nucmer, get coords.
     The faidx index on query_fasta and target_fasta must already exist
     (built by build_faidx before the parallel executor starts).
 
-    show-coords flags (unchanged from original):
+    show-coords flags:
       -r  sort by reference
       -c  include coverage
       -l  include sequence lengths
-      -L 1000  minimum alignment length 1000 nt
-      -I 90    minimum identity 90%
+      -L 1000        minimum alignment length 1000 nt
+      -I min_identity minimum identity for a reported alignment BLOCK
       -T  tab-delimited output
+
+    -I here filters spurious/short local alignment blocks WITHIN a single
+    query-target pair (nucmer can report multiple fragments per pair,
+    e.g. a real whole-genome-spanning block plus small unrelated matches
+    elsewhere) — it picks out the correct block for downstream analysis,
+    it is not a re-application of the pair-level qualifying-hit gate.
+
+    min_identity must be set no higher than the pair-level qualifying
+    threshold (params.blast_trim_min_pid in BLAST mode; vclust's ANI
+    threshold in cluster mode), or it risks rejecting the legitimate
+    alignment block for a pair that already passed that gate.
     """
     target_newname = re.split(r'\||\ |,', target)[0]
     qsuffix = f"{query}_{row_id}"
@@ -150,7 +166,7 @@ def pull_aln(row_id, query, target, query_fasta, target_fasta, fastadir, alndir)
         f'nucmer -p "{alndir}/query_{qsuffix}" '
         f'    "{fastadir}/{qsuffix}.query.fasta" '
         f'    "{fastadir}/{tsuffix}.target.fasta"; '
-        f'show-coords -r -c -l -L 1000 -I 90 -T '
+        f'show-coords -r -c -l -L 1000 -I {min_identity} -T '
         f'    "{alndir}/query_{qsuffix}.delta" '
         f'    > "{alndir}/query_{qsuffix}.coords"'
     )
@@ -268,6 +284,13 @@ def parse_args():
                         help="Output directory")
     parser.add_argument("-t", "--threads", type=int, default=1,
                         help="Number of parallel nucmer workers (default: 1)")
+    parser.add_argument("--min-identity", type=float, default=85,
+                        help="Minimum %% identity for a reported nucmer alignment "
+                             "block (show-coords -I). Filters spurious/short local "
+                             "matches within a pair; must be <= the pair-level "
+                             "qualifying threshold used upstream to select this pair "
+                             "(default: 85, matching the default BLAST-mode "
+                             "qualifying-hit threshold)")
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-c", "--cluster_pairs",
@@ -359,7 +382,7 @@ def main():
         futures = {
             executor.submit(
                 pull_aln, idx, r["qname"], r["tname"],
-                query_fasta, target_fasta, fastadir, alndir
+                query_fasta, target_fasta, fastadir, alndir, args.min_identity
             ): r["qname"]
             for idx, r in pairs_df.iterrows()
         }

@@ -36,25 +36,36 @@ flowchart TD
         H --> I["PICK_BEST_TRIM\nbest per rank1 by completeness + length"]
     end
 
-    I -->|"complete ✓"| R
+    I -->|"complete ✓"| RA
     I -->|incomplete| D
 
     subgraph BT ["Step 4: BLAST trim (optional)"]
         D["COLLECT_BLAST_INPUT\nsingletons + cluster-trim incomplete"]
         D --> J["BLASTN initial db"]
         D --> K["BLASTN secondary db\n(if run_secondary_blast=true)"]
-        J --> L["SELECT_BEST_BLAST_HIT\nprefer initial; secondary if no initial hit"]
+        J --> L["SELECT_BEST_BLAST_HIT\nqualifying hit: tcov≥85% AND pid≥85%\nprefer initial; secondary if no qualifying initial hit"]
         K --> L
-        L -->|"no hit in either db"| U
-        L -->|"has hit"| M["TRIM_GENOMES_BLAST + CHECKV\nnucmer trim → completeness filter"]
+        L -->|"no qualifying hit"| U
+        L -->|"qualifying hit"| M["TRIM_GENOMES_BLAST + CHECKV\nnucmer trim → completeness filter"]
     end
 
-    M -->|"complete ✓"| R
+    M -->|"complete ✓"| RA
     M -->|incomplete| U
 
-    U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv")]
+    U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv\nreasons: no_qualifying_hit | incomplete_after_trimming")]
 
-    R["Step 5: Recluster\nVCLUST complete reps from steps 3+4\n→ vclust_centroids.fasta"]
+    RA["recluster_input.fasta\n(complete reps from steps 3 + 4)"]
+    RA --> DD
+
+    subgraph DD ["Step 5a: Deduplication (optional)"]
+        CD["CHECKV_PRE_DEDUP\nflags kmer_freq > 1.2"]
+        CD --> DG["DEDUPLICATE_GENOMES\nprobe-vs-full nucmer alignment\ndetects tandem or inverted whole-genome duplication"]
+        DG --> CC["CHECKV_CORRECTED\n(small corrected subset, reporting only)"]
+    end
+
+    DD --> R
+
+    R["Step 5: Recluster\nVCLUST on deduplicated reps\n→ vclust_centroids.fasta"]
     R --> S
 
     S[/"vclust_centroids.fasta\nfinal non-redundant viral genome set"/]
@@ -62,6 +73,7 @@ flowchart TD
 
     style CT fill:none,stroke:#888,stroke-dasharray:5 3
     style BT fill:none,stroke:#888,stroke-dasharray:5 3
+    style DD fill:none,stroke:#888,stroke-dasharray:5 3
     style U fill:#faeeda,stroke:#ba7517
     style S fill:#e1f5ee,stroke:#0f6e56
 ```
@@ -70,11 +82,11 @@ flowchart TD
 
 | Sequence type | After step 3 | After step 4 | Final destination |
 |---|---|---|---|
-| Multi-member cluster, trimmed complete | → recluster | — | `vclust_centroids.fasta` |
-| Multi-member cluster, trimmed incomplete | → blast_trim | complete → recluster | `vclust_centroids.fasta` |
-| Multi-member cluster, trimmed incomplete | → blast_trim | incomplete → unvalidated | `unvalidated_genomes.fasta` |
-| Singleton | → blast_trim | complete → recluster | `vclust_centroids.fasta` |
-| Singleton | → blast_trim | no hit or incomplete | `unvalidated_genomes.fasta` |
+| Multi-member cluster, trimmed complete | → dedup → recluster | — | `vclust_centroids.fasta` |
+| Multi-member cluster, trimmed incomplete | → blast_trim | qualifying hit, complete → dedup → recluster | `vclust_centroids.fasta` |
+| Multi-member cluster, trimmed incomplete | → blast_trim | no qualifying hit or incomplete | `unvalidated_genomes.fasta` |
+| Singleton | → blast_trim | qualifying hit, complete → dedup → recluster | `vclust_centroids.fasta` |
+| Singleton | → blast_trim | no qualifying hit or incomplete | `unvalidated_genomes.fasta` |
 | Any | — | — (run_initial_blast=false) | `unvalidated_genomes.fasta` |
 
 ### Step 3 trimming detail
@@ -85,6 +97,46 @@ suffixed IDs (`<rank1_id>_trim12` etc.) so a **single CheckV run** covers
 all three. `PICK_BEST_TRIM` then selects the best result per rank1 sequence
 by completeness (primary) and length (tiebreaker), with trim12 preferred
 on a complete tie.
+
+### Step 4 qualifying-hit filter
+
+A BLAST hit only proceeds to nucmer trimming if it clears **both**:
+- target coverage (`tcov`) ≥ `--blast_trim_min_tcov` (default 85%)
+- percent identity (`pid`) ≥ `--blast_trim_min_pid` (default 85%, genus-level)
+
+Target coverage (not query coverage) is used because the untrimmed query
+may be larger than the true genome due to chimeric/host-contaminant
+regions, so full query coverage of the reference hit is not expected.
+This filter is applied **once**, in `SELECT_BEST_BLAST_HIT`, before any
+database is chosen — a query with a hit that exists but doesn't clear
+these thresholds is treated identically to a query with no hit at all;
+both are combined into a single `no_qualifying_hit` category routed to
+`unvalidated/`. For datasets of novel viruses, most raw "hits" are very
+short/low-coverage matches that are not meaningfully different from no
+hit at all, which is why this combined category exists.
+
+nucmer's own `show-coords -I` filter (inside `trim_genomes.py`) is a
+*different, narrower* check — it discards spurious short alignment
+fragments within an already-qualifying pair, it does not re-apply the
+qualifying-hit gate. Its threshold is deliberately set a few points below
+the qualifying-hit threshold (`--trim_identity_buffer`, default 5) so it
+can never reject the legitimate alignment block for a pair that already
+passed the real gate above.
+
+### Step 5a deduplication detail
+
+Some assemblies contain a genome duplicated as two tandem or
+inverted-repeat copies — a known assembler artifact, flagged by CheckV's
+`kmer_freq` metric (values near 2.0). `DEDUPLICATE_GENOMES` detects this
+via alignment: a short probe from the start of each flagged sequence is
+aligned against the full sequence with nucmer (which searches both
+strands, catching inverted duplications as well as tandem ones). Only
+sequences with clean, well-separated, high-identity, evenly-spaced
+repeat copies are auto-corrected to a single copy; anything ambiguous
+(e.g. a rotated/irregular repeat) is left untouched and flagged for
+manual review rather than risking an incorrect edit. See
+`dedup/dedup_report.tsv` and `dedup/plots/` for per-sequence detail.
+Disable with `--run_deduplication false`.
 
 ---
 
@@ -105,6 +157,7 @@ wvdb-build/
 │   ├── blast_trim_tools.nf         # Step 4 processes: blastn, blastani, select_best_hit,
 │   │                               #   trim_genomes_blast, merge_trimmed, checkv,
 │   │                               #   completeness_filter, collect_unvalidated
+│   ├── dedup_tools.nf              # Step 5a: DEDUPLICATE_GENOMES (whole-genome dup correction)
 │   └── summary.nf                  # PIPELINE_SUMMARY: sequence counts report
 ├── subworkflows/
 │   ├── cluster_trim.nf             # Step 3: parallel nucmer trimming → single CheckV
@@ -114,10 +167,11 @@ wvdb-build/
 │   ├── trim_genomes.py             # Nucmer-based trimming (cluster mode + BLAST mode)
 │   ├── merge_trimmed.py            # Combine trim12/13/23 FASTAs with suffixed IDs for CheckV
 │   ├── pick_best_trim.py           # Select best trimming per rank1 by completeness + length
-│   ├── select_best_blast_hit.py    # Route queries to initial or secondary db
+│   ├── select_best_blast_hit.py    # Qualifying-hit filter (tcov+pid) + route to initial/secondary db
 │   ├── blastani_nayfach.py         # Compute pairwise ANI from blastn tabular output
 │   ├── completeness_filter.py      # Filter sequences by CheckV completeness threshold
 │   ├── collect_unvalidated.py      # Gather unvalidated seqs with reason report
+│   ├── detect_genome_duplication.py # Alignment-based whole-genome duplication detection/correction
 │   └── pipeline_summary.py         # Sequence counts at each step → TSV + markdown report
 ├── envs/
 │   └── wvdb_build.yml              # Conda environment for all tools
@@ -140,7 +194,7 @@ All tools are managed via the conda environment in `envs/wvdb_build.yml`.
 | checkv | ≥ 1.0.3 | |
 | nucmer | 4.0.1 | All trimming steps; via `mummer4` conda package |
 | diamond | ≥ 2.0.9 | CheckV hard dependency |
-| Python | 3.11 | biopython, pandas, numpy required by bin/ scripts |
+| Python | 3.11 | biopython, pandas, numpy, matplotlib required by bin/ scripts |
 
 ---
 
@@ -175,7 +229,7 @@ Verify Python helper scripts:
 ```bash
 for script in parse_clusters.py trim_genomes.py merge_trimmed.py pick_best_trim.py \
               select_best_blast_hit.py blastani_nayfach.py completeness_filter.py \
-              collect_unvalidated.py pipeline_summary.py; do
+              collect_unvalidated.py detect_genome_duplication.py pipeline_summary.py; do
     python bin/$script --help > /dev/null 2>&1 \
         && echo "OK: $script" \
         || echo "CHECK: $script"
@@ -319,7 +373,14 @@ FASTA. Empty lines and lines starting with `#` are ignored.
 | `--initial_blastdb` | null | Primary BLAST reference db — required if `run_initial_blast=true` |
 | `--secondary_blastdb` | null | Secondary BLAST reference db — required if `run_secondary_blast=true` |
 | `--run_initial_blast` | true | Search `initial_blastdb` for singletons + incomplete sequences |
-| `--run_secondary_blast` | false | Also search `secondary_blastdb`; initial db hit preferred when both match |
+| `--run_secondary_blast` | false | Also search `secondary_blastdb`; initial db hit preferred when both qualify |
+| `--blast_trim_min_tcov` | 85.0 | Minimum target coverage %% for a BLAST hit to qualify for trimming |
+| `--blast_trim_min_pid` | 85.0 | Minimum percent identity (genus-level) for a BLAST hit to qualify for trimming |
+| `--trim_identity_buffer` | 5.0 | Safety margin subtracted from the qualifying/clustering threshold when setting nucmer's per-block identity filter |
+| `--run_deduplication` | true | Detect + correct tandem/inverted whole-genome duplications before final reclustering |
+| `--dedup_kmer_threshold` | 1.2 | CheckV `kmer_freq` threshold to flag a duplication candidate |
+| `--dedup_min_identity` | 95.0 | Minimum %% identity for a probe hit to count as a repeat copy |
+| `--dedup_min_coverage` | 0.90 | Minimum fractional coverage of the probe for a hit to count |
 | `--ani` | 0.95 | ANI threshold for vclust clustering |
 | `--qcov` | 0.85 | Query coverage threshold for vclust |
 | `--completeness` | 90 | CheckV completeness threshold (%) |
@@ -369,10 +430,18 @@ outdir/
 │   ├── checkv/                         # CheckV quality assessment
 │   └── cluster_reps_complete.fasta     # complete reps → step 5
 ├── unvalidated/
-│   ├── unvalidated_genomes.fasta       # untrimmed seqs: no BLAST hit or incomplete after trim
-│   └── unvalidated_report.tsv          # per-seq reason: no_blast_hit | incomplete_after_trimming
+│   ├── unvalidated_genomes.fasta       # untrimmed seqs: no qualifying BLAST hit or incomplete after trim
+│   └── unvalidated_report.tsv          # per-seq reason: no_qualifying_hit | incomplete_after_trimming
+├── dedup/                              # only created if run_deduplication=true
+│   ├── checkv_pre_dedup/               # CheckV on recluster_input.fasta (flags candidates)
+│   ├── deduplicated_all.fasta          # recluster_input with clean duplications corrected
+│   ├── corrected_only.fasta            # just the auto-corrected sequences, for examination
+│   ├── flagged_for_review.fasta        # ambiguous cases left untouched, needing manual review
+│   ├── dedup_report.tsv                # per-sequence decision + metrics (identity, coverage, orientation)
+│   ├── plots/                          # one PNG per flagged sequence showing probe alignment hits
+│   └── checkv_corrected/               # CheckV on corrected_only.fasta (reporting only)
 ├── 5_reclustered/
-│   ├── recluster_input.fasta           # merged complete reps from steps 3 + 4
+│   ├── recluster_input.fasta           # deduplicated complete reps from steps 3 + 4
 │   ├── vclust_clusters.tsv
 │   ├── vclust_centroids.txt
 │   └── vclust_centroids.fasta          # ← FINAL OUTPUT: non-redundant genome set
@@ -432,6 +501,21 @@ mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
 nextflow run main.nf -stub -profile local
 git add envs/wvdb_build.yml && git commit -m "feat: update conda env"
 ```
+
+### Single-gate identity threshold design
+
+The qualifying-hit filter (`tcov`/`pid` in `select_best_blast_hit.py`) is
+intentionally the **only** place a BLAST hit's quality is judged. An
+earlier version of this pipeline also applied an independent identity
+filter inside `trim_genomes.py`'s nucmer step; because the two thresholds
+were defined differently (percentage scale mismatch, and later a stricter
+default than the upstream gate), pairs that legitimately qualified
+upstream were silently dropped downstream with no error and no count
+anywhere reflecting the loss — the pipeline_summary math simply didn't
+add up. If you need to add another filtering step anywhere in this
+pipeline, thread the same parameter through rather than introducing a
+second independently-tuned threshold, and make sure every dropped
+sequence is written to an explicit output file with a named reason.
 
 ### task.ext.publish_dir pattern
 
