@@ -52,7 +52,7 @@ flowchart TD
     M -->|"complete ✓"| RA
     M -->|incomplete| U
 
-    U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv\nreasons: no_qualifying_hit | incomplete_after_trimming")]
+    U[("COLLECT_UNVALIDATED\nunvalidated_genomes.fasta\nunvalidated_report.tsv\nreasons: no_qualifying_hit | no_nucmer_alignment | incomplete_after_trimming")]
 
     RA["recluster_input.fasta\n(complete reps from steps 3 + 4)"]
     RA --> DD
@@ -122,6 +122,18 @@ qualifying-hit gate. Its threshold is deliberately set a few points below
 the qualifying-hit threshold (`--trim_identity_buffer`, default 5) so it
 can never reject the legitimate alignment block for a pair that already
 passed the real gate above.
+
+Even with a qualifying hit, nucmer can occasionally fail to produce a
+single usable alignment block — e.g. if the true homology is fragmented
+across several sub-length pieces that individually don't clear
+`show-coords -L 1000`, even though their combined coverage was enough to
+qualify upstream. These pairs are tracked explicitly in
+`no_nucmer_alignment_ids.txt` and routed to `unvalidated/` with reason
+`no_nucmer_alignment`, rather than being silently dropped. Every query
+that enters `blast_trim_input.fasta` therefore has exactly one of three
+tracked fates: `complete`, `incomplete_after_trimming`,
+`no_qualifying_hit`, or `no_nucmer_alignment` — the pipeline_summary
+counts for these should always sum back to the total input exactly.
 
 ### Step 5a deduplication detail
 
@@ -415,23 +427,35 @@ outdir/
 │   ├── singletons.txt                  # 1-member clusters → step 4
 │   ├── candidate_ids.txt               # rank1/2/3 IDs for nucmer
 │   ├── trimming_candidates.fasta       # extracted rank1/2/3 sequences
-│   ├── trim12/                         # trim12 nucmer outputs
-│   ├── trim13/                         # trim13 nucmer outputs
-│   ├── trim23/                         # trim23 nucmer outputs
+│   ├── trim12/                         # trim12 nucmer outputs (trimmed.fasta, .bed,
+│   │                                    #   no_nucmer_alignment.txt — informational only;
+│   │                                    #   PICK_BEST_TRIM already falls back to trim13/23)
+│   ├── trim13/                         # trim13 nucmer outputs (same file set as trim12/)
+│   ├── trim23/                         # trim23 nucmer outputs (same file set as trim12/)
 │   ├── all_trimmed.fasta               # merged with suffixed IDs for CheckV
 │   ├── checkv/                         # CheckV quality assessment (single run)
 │   ├── complete_reps.fasta             # complete trimmed reps → step 5
 │   └── blast_trim_ids.txt              # incomplete cluster IDs → step 4
 ├── 4_blast_trim/                       # only created if run_initial_blast=true
 │   ├── blast_trim_input.fasta          # singletons + incomplete from step 3
-│   ├── initial/                        # blastn + blastani + trim outputs (initial db)
-│   ├── secondary/                      # blastn + blastani + trim outputs (secondary db)
-│   ├── blast_trimmed.fasta             # merged trimmed output
-│   ├── checkv/                         # CheckV quality assessment
-│   └── cluster_reps_complete.fasta     # complete reps → step 5
+│   ├── blast_trim_input_ids.txt        # IDs of the above
+│   ├── initial/                        # blastn + blastani outputs (initial db)
+│   │   ├── initial.blastn.tsv
+│   │   ├── initial.blastn.ani.tsv
+│   │   ├── initial.trimmed.fasta       # nucmer-trimmed reference-side output
+│   │   ├── initial.trimming.bed
+│   │   └── initial.no_nucmer_alignment.txt  # qualifying pairs with no usable alignment
+│   ├── secondary/                      # same structure as initial/ (if run_secondary_blast=true)
+│   ├── initial_hits.tsv                # SELECT_BEST_BLAST_HIT: qualifying rows routed to initial db
+│   ├── secondary_hits.tsv              # qualifying rows routed to secondary db (no qualifying initial hit)
+│   ├── no_hit_ids.txt                  # no qualifying hit in either db → unvalidated
+│   ├── blast_trimmed.fasta             # merged trimmed output (initial + secondary)
+│   ├── checkv/                         # CheckV quality assessment on blast_trimmed.fasta
+│   ├── cluster_reps_complete.fasta     # complete reps → step 5
+│   └── cluster_reps_incomplete_or_na.txt # incomplete after CheckV → unvalidated
 ├── unvalidated/
 │   ├── unvalidated_genomes.fasta       # untrimmed seqs: no qualifying BLAST hit or incomplete after trim
-│   └── unvalidated_report.tsv          # per-seq reason: no_qualifying_hit | incomplete_after_trimming
+│   └── unvalidated_report.tsv          # per-seq reason: no_qualifying_hit | no_nucmer_alignment | incomplete_after_trimming
 ├── dedup/                              # only created if run_deduplication=true
 │   ├── checkv_pre_dedup/               # CheckV on recluster_input.fasta (flags candidates)
 │   ├── deduplicated_all.fasta          # recluster_input with clean duplications corrected
