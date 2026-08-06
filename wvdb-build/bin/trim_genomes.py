@@ -345,6 +345,7 @@ def main():
         print("No pairs to process — writing empty outputs.", file=sys.stderr)
         open(os.path.join(outdir, 'trimming.bed'),  'w').close()
         open(os.path.join(outdir, 'trimmed.fasta'), 'w').close()
+        open(os.path.join(outdir, 'no_nucmer_alignment_ids.txt'), 'w').close()
         sys.exit(0)
 
     fastadir = os.path.join(outdir, 'pairs')
@@ -397,9 +398,29 @@ def main():
 
     # --- Step 5: parse nucmer output → BED ---
     bed_df = parse_nucmer(alndir)
+
+    # Track any pairs that had a qualifying hit (per select_best_blast_hit.py
+    # upstream, or vclust cluster membership in cluster mode) but produced no
+    # usable nucmer alignment — e.g. homology fragmented across multiple
+    # sub-length blocks with no single block clearing the -L/-I thresholds.
+    # This must always be explicitly reported, never silently dropped: an
+    # earlier version of this pipeline had exactly this gap, where such
+    # pairs vanished from every downstream count with no signal anywhere.
+    aligned_queries = set(bed_df['ref_name']) if not bed_df.empty else set()
+    dropped = sorted(set(pairs_df['qname']) - aligned_queries)
+    dropped_path = os.path.join(outdir, 'no_nucmer_alignment_ids.txt')
+    with open(dropped_path, 'w') as f:
+        f.writelines(f"{d}\n" for d in dropped)
+    if dropped:
+        print(f"Warning: {len(dropped)} pair(s) produced no usable nucmer "
+              f"alignment (no single block clearing length/identity "
+              f"thresholds) — written to {dropped_path}", file=sys.stderr)
+
     if bed_df.empty:
-        print("Error: no alignments produced. BED file will not be written.", file=sys.stderr)
-        sys.exit(1)
+        print("Warning: no alignments produced for any pair.", file=sys.stderr)
+        open(os.path.join(outdir, 'trimming.bed'),  'w').close()
+        open(os.path.join(outdir, 'trimmed.fasta'), 'w').close()
+        sys.exit(0)
 
     bed_path = os.path.join(outdir, "trimming.bed")
     bed_df.to_csv(bed_path, sep='\t', index=False, header=False)

@@ -45,7 +45,10 @@ def main():
         description="Collect unvalidated sequences into a single FASTA with report."
     )
     parser.add_argument('--no-hit-ids',     default=None,
-                        help='IDs with no BLAST hit in any db')
+                        help='IDs with no qualifying BLAST hit in any db')
+    parser.add_argument('--no-alignment-ids', default=None,
+                        help='IDs with a qualifying hit but no usable nucmer alignment '
+                             '(fragmented homology, no single block clearing thresholds)')
     parser.add_argument('--incomplete-ids', default=None,
                         help='IDs trimmed but incomplete after CheckV')
     parser.add_argument('--all-fasta',      required=True,
@@ -56,15 +59,20 @@ def main():
                         help='Output TSV report: seq_id, reason')
     args = parser.parse_args()
 
-    no_hit_ids     = load_ids(args.no_hit_ids)
-    incomplete_ids = load_ids(args.incomplete_ids)
+    no_hit_ids       = load_ids(args.no_hit_ids)
+    no_alignment_ids = load_ids(args.no_alignment_ids)
+    incomplete_ids   = load_ids(args.incomplete_ids)
 
-    # Build reason map
+    # Build reason map. Priority order when an ID appears in multiple sets
+    # (shouldn't normally happen, but incomplete/actually-trimmed status is
+    # the most specific signal available, so it takes priority):
+    #   incomplete_after_trimming > no_nucmer_alignment > no_qualifying_hit
     reason = {}
     for id_ in no_hit_ids:
         reason[id_] = 'no_qualifying_hit'
+    for id_ in no_alignment_ids:
+        reason[id_] = 'no_nucmer_alignment'
     for id_ in incomplete_ids:
-        # incomplete takes priority if somehow in both sets
         reason[id_] = 'incomplete_after_trimming'
 
     all_unvalidated = set(reason.keys())
@@ -95,6 +103,8 @@ def main():
     print(f"[collect_unvalidated] unvalidated sequences  : {len(all_unvalidated)}",
           file=sys.stderr)
     print(f"[collect_unvalidated]   no qualifying hit    : {len(no_hit_ids)}",
+          file=sys.stderr)
+    print(f"[collect_unvalidated]   no nucmer alignment  : {len(no_alignment_ids)}",
           file=sys.stderr)
     print(f"[collect_unvalidated]   incomplete after trim: {len(incomplete_ids)}",
           file=sys.stderr)

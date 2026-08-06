@@ -214,8 +214,9 @@ process TRIM_GENOMES_BLAST {
     val  db_name              // "initial" or "secondary"
 
     output:
-    path "${db_name}.trimmed.fasta", emit: trimmed_fasta
-    path "${db_name}.trimming.bed",  emit: trimming_bed
+    path "${db_name}.trimmed.fasta",           emit: trimmed_fasta
+    path "${db_name}.trimming.bed",            emit: trimming_bed
+    path "${db_name}.no_nucmer_alignment.txt", emit: no_alignment_ids
 
     script:
     """
@@ -229,11 +230,12 @@ process TRIM_GENOMES_BLAST {
 
     mv trimmed.fasta ${db_name}.trimmed.fasta
     mv trimming.bed  ${db_name}.trimming.bed
+    mv no_nucmer_alignment_ids.txt ${db_name}.no_nucmer_alignment.txt
     """
 
     stub:
     """
-    touch ${db_name}.trimmed.fasta ${db_name}.trimming.bed
+    touch ${db_name}.trimmed.fasta ${db_name}.trimming.bed ${db_name}.no_nucmer_alignment.txt
     """
 }
 
@@ -288,6 +290,7 @@ process COLLECT_UNVALIDATED {
 
     input:
     path no_hit_ids           // no_hit_ids.txt from SELECT_BEST_BLAST_HIT
+    path no_alignment_ids     // merged initial+secondary no_nucmer_alignment.txt
     path incomplete_ids       // incomplete IDs from COMPLETENESS_FILTER
     path all_fasta            // filtered_all.fasta
 
@@ -298,11 +301,12 @@ process COLLECT_UNVALIDATED {
     script:
     """
     collect_unvalidated.py \\
-        --no-hit-ids     "${no_hit_ids}" \\
-        --incomplete-ids "${incomplete_ids}" \\
-        --all-fasta      "${all_fasta}" \\
-        --out-fasta      unvalidated_genomes.fasta \\
-        --out-report     unvalidated_report.tsv
+        --no-hit-ids       "${no_hit_ids}" \\
+        --no-alignment-ids "${no_alignment_ids}" \\
+        --incomplete-ids   "${incomplete_ids}" \\
+        --all-fasta        "${all_fasta}" \\
+        --out-fasta        unvalidated_genomes.fasta \\
+        --out-report       unvalidated_report.tsv
     """
 
     stub:

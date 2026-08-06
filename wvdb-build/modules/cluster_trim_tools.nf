@@ -114,8 +114,9 @@ process TRIM_GENOMES {
     val  tag_label    // "trim12", "trim13", or "trim23"
 
     output:
-    path "${tag_label}.trimmed.fasta", emit: trimmed_fasta
-    path "${tag_label}.trimming.bed",  emit: trimming_bed
+    path "${tag_label}.trimmed.fasta",           emit: trimmed_fasta
+    path "${tag_label}.trimming.bed",            emit: trimming_bed
+    path "${tag_label}.no_nucmer_alignment.txt", emit: no_alignment_ids
 
     script:
     """
@@ -128,11 +129,12 @@ process TRIM_GENOMES {
 
     mv trimmed.fasta ${tag_label}.trimmed.fasta
     mv trimming.bed  ${tag_label}.trimming.bed
+    mv no_nucmer_alignment_ids.txt ${tag_label}.no_nucmer_alignment.txt
     """
 
     stub:
     """
-    touch ${tag_label}.trimmed.fasta ${tag_label}.trimming.bed
+    touch ${tag_label}.trimmed.fasta ${tag_label}.trimming.bed ${tag_label}.no_nucmer_alignment.txt
     """
 }
 

@@ -211,6 +211,7 @@ def main():
     n_reclust      = reclust_stats[0]  if reclust_stats  else 0
     n_centroids    = centroid_stats[0] if centroid_stats else 0
     unval_no_hit   = unval_reasons.get('no_qualifying_hit', 0)
+    unval_no_aln   = unval_reasons.get('no_nucmer_alignment', 0)
     unval_incomp   = unval_reasons.get('incomplete_after_trimming', 0)
 
     # --- Build DataFrame ---
@@ -237,6 +238,8 @@ def main():
                   bt_complete),
         count_row('unvalidated_no_hit',     'Unvalidated: no qualifying BLAST hit',
                   unval_no_hit),
+        count_row('unvalidated_no_alignment','Unvalidated: no usable nucmer alignment despite qualifying hit',
+                  unval_no_aln),
         count_row('unvalidated_incomplete', 'Unvalidated: incomplete after trimming',
                   unval_incomp),
         fasta_row('unvalidated_total',      'Unvalidated total',
@@ -285,6 +288,7 @@ def main():
 | 4. BLAST trim | Input (singletons + incomplete) | {fmt(n_bt_input)} | — | — |
 | | Complete trimmed reps | {fmt(n_bt_complete)} | {fmt(bt_complete[1] if bt_complete else None)} | {fmt(bt_complete[3] if bt_complete else None)} bp |
 | Unvalidated | No qualifying BLAST hit | {fmt(unval_no_hit)} | — | — |
+| | No usable nucmer alignment (qualifying hit, but homology too fragmented to trim) | {fmt(unval_no_aln)} | — | — |
 | | Incomplete after trimming | {fmt(unval_incomp)} | — | — |
 | | Total unvalidated | {fmt(n_unval)} | {fmt(unval_stats[1] if unval_stats else None)} | {fmt(unval_stats[3] if unval_stats else None)} bp |
 | 5a. Deduplication | Whole-genome duplication candidates flagged | {fmt(dedup_stats['n_flagged'])} | — | — |

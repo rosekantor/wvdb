@@ -143,10 +143,17 @@ workflow BLAST_TRIM {
                 "secondary"
             )
             secondary_trimmed = TRIM_GENOMES_BLAST_SECONDARY.out.trimmed_fasta
+            secondary_no_aln  = TRIM_GENOMES_BLAST_SECONDARY.out.no_alignment_ids
         } else {
             secondary_trimmed = Channel.of('no_secondary')
                 .map { _x ->
                     def f = file("${workDir}/empty_secondary.fasta")
+                    f.text = ''
+                    return f
+                }
+            secondary_no_aln = Channel.of('no_secondary')
+                .map { _x ->
+                    def f = file("${workDir}/empty_secondary_no_aln.txt")
                     f.text = ''
                     return f
                 }
@@ -174,15 +181,23 @@ workflow BLAST_TRIM {
         incomplete_ids_ch = COMPLETENESS_FILTER.out.incomplete_ids
         no_hit_ids_ch    = SELECT_BEST_BLAST_HIT.out.no_hit_ids
 
+        // Merge no-usable-nucmer-alignment IDs from initial + secondary
+        no_alignment_ids_ch = TRIM_GENOMES_BLAST.out.no_alignment_ids
+            .mix(secondary_no_aln)
+            .collectFile(name: 'no_nucmer_alignment_merged.txt')
+
     } else {
         // run_initial_blast = false: no trimming, all sequences → unvalidated
         complete_fasta    = Channel.empty()
         incomplete_ids_ch = Channel.empty()
         no_hit_ids_ch     = GET_QUERY_IDS.out.query_ids
+        no_alignment_ids_ch = Channel.of('no_blast').map { _x ->
+            def f = file("${workDir}/empty_no_alignment.txt"); f.text = ''; return f }
     }
 
     // -----------------------------------------------------------------------
-    // Collect all unvalidated sequences (no hit + incomplete after trim)
+    // Collect all unvalidated sequences (no qualifying hit + no usable
+    // nucmer alignment + incomplete after trim)
     // -----------------------------------------------------------------------
     def incomplete_ids_final = (params.run_initial_blast)
         ? incomplete_ids_ch
@@ -191,6 +206,7 @@ workflow BLAST_TRIM {
 
     COLLECT_UNVALIDATED(
         no_hit_ids_ch,
+        no_alignment_ids_ch,
         incomplete_ids_final,
         all_fasta
     )
