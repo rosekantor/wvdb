@@ -1,0 +1,8 @@
+./test/data/batch1/assembly/sample1/filtered_provirus.fasta
+./test/data/batch1/assembly/sample1/filtered_virus.fasta
+./test/data/batch1/assembly/sample2/filtered_provirus.fasta
+./test/data/batch1/assembly/sample2/filtered_virus.fasta
+./test/data/batch1/assembly/sample3/filtered_provirus.fasta
+./test/data/batch1/assembly/sample3/filtered_virus.fasta
+./test/data/batch1/assembly/sample4/filtered_provirus.fasta
+./test/data/batch1/assembly/sample4/filtered_virus.fasta

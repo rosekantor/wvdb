@@ -1,0 +1,37 @@
+name: wvdb-annotate
+# Channel priority: conda-forge first, then bioconda.
+# To create:   mamba env create -f envs/wvdb_annotate.yml
+# To update:   mamba env update -n wvdb-annotate -f envs/wvdb_annotate.yml --prune
+# To activate: conda activate wvdb-annotate
+#
+# Note: RdRPCATCH requires Python 3.12 — use separate 'rdrpcatch' conda env.
+# Note: RNAVirHost requires pinned ML deps — use separate 'rnavirhost' conda env.
+# Both use per-process conda overrides in nextflow.config.
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  # --- Python runtime ---
+  - python=3.11
+
+  # --- Core annotation tools ---
+  - bioconda::checkv>=1.0.3         # genome completeness + quality
+  - bioconda::genomad>=1.8.0        # virus classification + gene prediction
+  - bioconda::blast=2.16.0          # blastn for nucleotide searches
+  - bioconda::diamond>=2.0.9        # protein search vs NCBI-nr
+  - bioconda::hmmer>=3.3.2           # hmmsearch for HMM profile searches
+
+  # --- Python packages ---
+  - conda-forge::biopython>=1.80    # Bio.SeqIO, Bio.Entrez
+  - conda-forge::pandas>=1.5
+  - conda-forge::numpy>=1.23
+  - conda-forge::requests            # HTTP calls to LLM provider APIs (categorize_host_terms.py)
+  - conda-forge::lxml                # required by pandas.read_html() in prepare_ictv.py
+  - conda-forge::python-dotenv       # loads API keys from .env for categorize_host_terms.py
+
+  # --- Nextflow runtime ---
+  - conda-forge::openjdk=17
+  - bioconda::nextflow>=23.10

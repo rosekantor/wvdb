@@ -1,0 +1,284 @@
+#!/usr/bin/env nextflow
+/*
+ * main.nf  —  wvdb_annotate: viral genome annotation pipeline
+ *
+ * Steps (all run in parallel from input_fasta except where noted):
+ *   1. CheckV          — genome completeness + quality assessment
+ *   2. geNomad         — virus classification + gene prediction
+ *   3. RdRPCATCH       — RdRP detection (optional, default: true)
+ *   4. BLASTn × N dbs  — nucleotide search (optional, default: true)
+ *      └─ BLASTani       — pairwise ANI from BLASTn output
+ *   5. CHARACTERIZE_PROTEINS — DIAMOND × N + hmmsearch × N (optional; uses
+ *                        geNomad-predicted proteins; default: both false)
+ *   6. RNAVirHost      — host prediction (optional, default: true)
+ *                        requires CheckV + geNomad + RdRPCATCH output
+ *   7. MERGE_ANNOTATIONS — combine all outputs per vOTU
+ *   8. GUESS_HOST      — ensemble LLM host prediction (optional, default: false)
+ *   9. ANNOTATION_SUMMARY — per-step counts report
+ *
+ * Databases are specified via a unified CSV file (--databases):
+ *   type,name,path
+ *   blastn,IMGVR,/path/to/IMGVR5_UViG.fna
+ *   diamond,nr,/path/to/nr.dmnd
+ *   hmm,pfam,/path/to/Pfam-A.hmm
+ *   CHVD,/path/to/CHVD_virus_sequences.fasta
+ *
+ * Usage:
+ *   nextflow run main.nf -profile cluster,conda \
+ *       --input_fasta   /path/to/votus.fasta \
+ *       --outdir        /path/to/results \
+ *       --checkvdb      /path/to/checkv-db-v1.5 \
+ *       --genomad_db    /path/to/genomad_db \
+ *       --databases     /path/to/databases.csv
+ */
+
+nextflow.enable.dsl = 2
+
+include { CHECKV             } from './modules/checkv'
+include { GENOMAD            } from './modules/genomad'
+include { RDRPCATCH          } from './modules/rdrpcatch'
+include { BLASTN             } from './modules/blastn_tools'
+include { BLASTANI           } from './modules/blastn_tools'
+include { RNAVIRHOST         } from './modules/rnavirhost'
+include { PREPARE_ICTV       } from './modules/summary'
+include { MERGE_ANNOTATIONS  } from './modules/summary'
+include { CATEGORIZE_HOST_TERMS  } from './modules/summary'
+include { GUESS_HOST             } from './modules/summary'
+include { CHARACTERIZE_PROTEINS  } from './subworkflows/characterize_proteins'
+include { ANNOTATION_SUMMARY } from './modules/summary'
+
+workflow {
+
+    // -----------------------------------------------------------------------
+    // PREPARE_ICTV mode — run with --prepare_ictv true to generate the ICTV
+    // reference file without running the full annotation workflow.
+    //
+    // Usage (auto-download):
+    //   nextflow run main.nf --prepare_ictv true --outdir /path/to/ref_data
+    //
+    // Usage (manual download):
+    //   nextflow run main.nf --prepare_ictv true \
+    //       --outdir /path/to/ref_data \
+    //       --ictv_raw /path/to/ictv_VirusPropertiesByFamily.tsv
+    // -----------------------------------------------------------------------
+    if ( params.prepare_ictv ) {
+        raw_tsv = params.ictv_raw
+            ? Channel.fromPath(params.ictv_raw, checkIfExists: !workflow.stubRun)
+            : Channel.of(file('NO_FILE_ICTV_RAW'))
+        PREPARE_ICTV(raw_tsv)
+        return
+    }
+
+    // -----------------------------------------------------------------------
+    // Parameter validation
+    // -----------------------------------------------------------------------
+    def errors = []
+    if (!params.input_fasta)   errors << "  --input_fasta is required"
+    if (!params.outdir)        errors << "  --outdir is required"
+    if (!params.checkvdb)      errors << "  --checkvdb is required"
+    if (!params.genomad_db)    errors << "  --genomad_db is required"
+    // Nextflow may pass boolean CLI params as strings; normalise to boolean
+    def run_rdrpcatch  = params.run_rdrpcatch  instanceof Boolean ? params.run_rdrpcatch  : params.run_rdrpcatch.toString()  != 'false'
+    def run_blastn     = params.run_blastn     instanceof Boolean ? params.run_blastn     : params.run_blastn.toString()     != 'false'
+    def run_diamond    = params.run_diamond    instanceof Boolean ? params.run_diamond    : params.run_diamond.toString()    != 'false'
+    def run_hmmsearch  = params.run_hmmsearch  instanceof Boolean ? (params.run_hmmsearch  ?: false) : params.run_hmmsearch.toString()  != 'false'
+    def run_rnavirhost = params.run_rnavirhost instanceof Boolean ? params.run_rnavirhost : params.run_rnavirhost.toString() != 'false'
+    def run_guess_host = params.run_guess_host instanceof Boolean ? params.run_guess_host : params.run_guess_host.toString() != 'false'
+
+    if (run_rdrpcatch  && !params.rdrpcatch_db)  errors << "  --rdrpcatch_db is required when --run_rdrpcatch=true"
+    if (run_guess_host && !params.llm_env_file)  errors << "  --llm_env_file is required when --run_guess_host=true"
+    if (run_guess_host && !params.llm_provider)  errors << "  --llm_provider is required when --run_guess_host=true"
+    if (run_guess_host && !params.llm_model)     errors << "  --llm_model is required when --run_guess_host=true"
+    if (run_guess_host && params.llm_provider == 'openai_compatible' && !params.llm_base_url)
+        errors << "  --llm_base_url is required when --llm_provider=openai_compatible"
+    if ((run_blastn || run_diamond || run_hmmsearch) && !params.databases)
+        errors << "  --databases CSV is required when run_blastn, run_diamond, or run_hmmsearch is true"
+    if (errors) {
+        log.error "Parameter errors:\n" + errors.join("\n")
+        System.exit(1)
+    }
+
+    // Validate paths exist (skip during stub runs)
+    if (!workflow.stubRun) {
+        [params.input_fasta, params.checkvdb, params.genomad_db].each { p ->
+            if (p && !file(p).exists()) error "Path not found: ${p}"
+        }
+        if (run_rdrpcatch && !file(params.rdrpcatch_db).exists())
+            error "rdrpcatch_db not found: ${params.rdrpcatch_db}"
+        if ((run_blastn || run_diamond || run_hmmsearch)
+                && params.databases && !file(params.databases).exists())
+            error "databases CSV not found: ${params.databases}"
+    }
+
+    log.info """
+    ============================================
+     wvdb_annotate: viral genome annotation
+    ============================================
+     input_fasta        : ${params.input_fasta}
+     outdir             : ${params.outdir}
+     run_rdrpcatch      : ${params.run_rdrpcatch}
+     run_blastn         : ${params.run_blastn}
+     run_diamond        : ${params.run_diamond}
+     run_hmmsearch      : ${params.run_hmmsearch}
+     run_rnavirhost     : ${params.run_rnavirhost}
+     run_guess_host     : ${params.run_guess_host}
+    ============================================
+    """.stripIndent()
+
+    def check      = !workflow.stubRun
+    input_fasta    = file(params.input_fasta, checkIfExists: check)
+    checkvdb       = file(params.checkvdb,    checkIfExists: check)
+    genomad_db     = file(params.genomad_db,  checkIfExists: check)
+    // diamond_dbs and hmm_profiles read as CSV via splitCsv in CHARACTERIZE_PROTEINS
+
+    // -----------------------------------------------------------------------
+    // Step 1 — CheckV
+    // -----------------------------------------------------------------------
+    CHECKV(
+        input_fasta,
+        checkvdb
+    )
+
+    // -----------------------------------------------------------------------
+    // Step 2 — geNomad
+    // -----------------------------------------------------------------------
+    GENOMAD(
+        input_fasta,
+        genomad_db
+    )
+
+    // -----------------------------------------------------------------------
+    // Step 3 — Protein characterization (optional)
+    // diamond and hmm rows from unified databases CSV
+    // -----------------------------------------------------------------------
+    if ( run_diamond || run_hmmsearch ) {
+        CHARACTERIZE_PROTEINS(
+            GENOMAD.out.proteins_faa
+        )
+        protein_summary_tsv = CHARACTERIZE_PROTEINS.out.protein_summary_tsv
+    } else {
+        protein_summary_tsv = Channel.of(file('NO_FILE_PROTEIN_SUMMARY'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4 — RdRPCATCH (optional)
+    // -----------------------------------------------------------------------
+    if ( run_rdrpcatch ) {
+        rdrpcatch_db = file(params.rdrpcatch_db, checkIfExists: check)
+        RDRPCATCH(
+            input_fasta,
+            rdrpcatch_db
+        )
+        rdrpcatch_tsv = RDRPCATCH.out.results_tsv.flatten().first()
+    } else {
+        rdrpcatch_tsv = Channel.of(file('NO_FILE_RDRPCATCH'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 4 — BLASTn × N databases (optional, parallel)
+    // blastn_dbs CSV format: name,path  (one database per row, header required)
+    // -----------------------------------------------------------------------
+    if ( run_blastn ) {
+        // Filter unified databases CSV to blastn rows
+        // db paths kept as strings (val) to avoid staging index file issues
+        blastn_dbs_ch = Channel
+            .fromPath(params.databases)
+            .splitCsv(header: true)
+            .filter { row -> row.type == "blastn" }
+            .map { row -> tuple(row.name, row.path) }
+
+        BLASTN(
+            input_fasta,
+            blastn_dbs_ch.map { name, path -> name },
+            blastn_dbs_ch.map { name, path -> path }
+        )
+
+        BLASTANI(
+            BLASTN.out.blastn_result
+        )
+
+        // Collect all ANI TSVs for MERGE_ANNOTATIONS
+        // merge_annotations.py receives them as a flat list staged in the work dir
+        blastn_ani_tsvs = BLASTANI.out.ani_result
+            .map { db_name, tsv -> tsv }
+            .collect()
+    } else {
+        blastn_ani_tsvs = Channel.of(file('NO_FILE_BLASTN'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6 — RNAVirHost host prediction (optional)
+    // Sequential: requires CheckV + geNomad output
+    // -----------------------------------------------------------------------
+    if ( run_rnavirhost ) {
+        if ( !run_rdrpcatch ) {
+            log.warn "run_rnavirhost=true requires run_rdrpcatch=true — skipping RNAVirHost"
+            rnavirhost_tsv = Channel.of(file('NO_FILE_RNAVIRHOST'))
+        } else {
+            RNAVIRHOST(
+                input_fasta,
+                GENOMAD.out.virus_summary,
+                RDRPCATCH.out.results_tsv.flatten().first()
+            )
+            // Handle both output path conventions across rnavirhost versions
+            rnavirhost_tsv = RNAVIRHOST.out.result_csv
+                .mix(RNAVIRHOST.out.result_csv2)
+                .first()
+        }
+    } else {
+        rnavirhost_tsv = Channel.of(file('NO_FILE_RNAVIRHOST'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 7 — Merge all annotations
+    // -----------------------------------------------------------------------
+    MERGE_ANNOTATIONS(
+        CHECKV.out.quality_summary,
+        GENOMAD.out.virus_summary,
+        file(params.ictv_fam),
+        blastn_ani_tsvs,
+        rdrpcatch_tsv,
+        rnavirhost_tsv
+    )
+
+    // -----------------------------------------------------------------------
+    // Step 8 — Guess host (optional, sequential after merge)
+    // Split into two processes: CATEGORIZE_HOST_TERMS (LLM, cacheable) and
+    // GUESS_HOST (decision tree, no LLM dependency, safe to rerun freely).
+    // -----------------------------------------------------------------------
+    if ( run_guess_host ) {
+        host_dict_cache = params.host_dict_cache
+            ? Channel.fromPath(params.host_dict_cache, checkIfExists: !workflow.stubRun)
+            : Channel.of(file('NO_FILE_HOST_DICT'))
+        isolation_dict_cache = params.isolation_dict_cache
+            ? Channel.fromPath(params.isolation_dict_cache, checkIfExists: !workflow.stubRun)
+            : Channel.of(file('NO_FILE_ISO_DICT'))
+
+        CATEGORIZE_HOST_TERMS(
+            MERGE_ANNOTATIONS.out.merged_tsv,
+            host_dict_cache,
+            isolation_dict_cache
+        )
+
+        GUESS_HOST(
+            MERGE_ANNOTATIONS.out.merged_tsv,
+            CATEGORIZE_HOST_TERMS.out.host_dict,
+            CATEGORIZE_HOST_TERMS.out.isolation_dict
+        )
+        host_tsv = GUESS_HOST.out.host_tsv
+    } else {
+        host_tsv = Channel.of(file('NO_FILE_GUESS_HOST'))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 9 — Annotation summary report
+    // -----------------------------------------------------------------------
+    ANNOTATION_SUMMARY(
+        input_fasta,
+        CHECKV.out.quality_summary,
+        GENOMAD.out.virus_summary,
+        MERGE_ANNOTATIONS.out.merged_tsv,
+        host_tsv
+    )
+}
+

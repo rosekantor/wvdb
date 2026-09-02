@@ -1,0 +1,38 @@
+name: wvdb-build
+# Channel priority: conda-forge first (general deps), then bioconda (bio tools).
+# strict channel priority prevents subtle dependency conflicts.
+# To create:   mamba env create -f envs/wvdb_build.yml
+# To update:   mamba env update -n wvdb-build -f envs/wvdb_build.yml --prune
+# To activate: conda activate wvdb-build
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults     # exclude defaults channel to avoid conflicts
+
+dependencies:
+  # --- Python runtime ---
+  - python=3.11
+
+  # --- Core pipeline tools ---
+  - bioconda::seqkit=2.9.0
+  - bioconda::vclust=1.3.1
+  - bioconda::blast=2.16.0        # provides blastn, makeblastdb
+  - bioconda::checkv>=1.0.3        # pin to 1.0.3 — newer versions have macOS ARM64 conflicts
+  - bioconda::mummer4=4.0.1       # provides nucmer; package name is mummer4 on bioconda
+
+  # --- checkv hard dependency: pin diamond to exact version ---
+  - bioconda::diamond>=2.0.9        # checkv 1.0.3 requires diamond==2.0.9
+
+  # --- Python packages used by helper scripts in bin/ ---
+  # confirmed from imports: Bio.SeqIO, numpy, pandas, matplotlib
+  # (collections, glob, os, re, shutil, subprocess, sys, etc. are stdlib — no entry needed)
+  - conda-forge::biopython>=1.80
+  - conda-forge::pandas>=1.5
+  - conda-forge::numpy>=1.23
+  - conda-forge::matplotlib>=3.5    # self-alignment plots in detect_genome_duplication.py
+
+  # --- Nextflow runtime (Java) ---
+  # Nextflow requires Java 11+; bundled here so the env is fully self-contained
+  - conda-forge::openjdk=17
+  - bioconda::nextflow>=23.10
